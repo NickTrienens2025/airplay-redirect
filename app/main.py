@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import AsyncGenerator, Set
 
 import httpx
-from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect, status
+from fastapi import BackgroundTask, FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from app.config import settings
@@ -476,49 +476,13 @@ async def stream_content(
             else:
                 fetched_size = None
 
-            # For non-M3U8 files (segments), stream directly
-            async def stream_generator() -> AsyncGenerator[bytes, None]:
-                """Stream content in chunks."""
-                bytes_streamed = 0
-                chunk_count = 0
-                try:
-                    logger.info(f"[PROXY] Starting stream: path={path}")
-                    try:
-                        async for chunk in cf_response.aiter_bytes(chunk_size=8192):
-                            bytes_streamed += len(chunk)
-                            chunk_count += 1
-                            yield chunk
-                        logger.info(
-                            f"[PROXY] Stream complete: path={path}, "
-                            f"bytes={bytes_streamed}, chunks={chunk_count}"
-                        )
-                    except httpx.StreamClosed:
-                        # Client disconnected early - this is normal for HLS streaming
-                        # when clients seek or stop playback
-                        logger.info(
-                            f"[PROXY] Stream closed by client: path={path}, "
-                            f"bytes_streamed={bytes_streamed}, chunks={chunk_count}"
-                        )
-                        # Stop generator gracefully - don't raise exception
-                        return
-                    except Exception as e:
-                        # Catch any other exceptions during streaming to prevent 502 errors
-                        # This includes ExceptionGroup which can wrap multiple exceptions
-                        logger.warning(
-                            f"[PROXY] Exception during streaming: type={type(e).__name__}, "
-                            f"path={path}, bytes_streamed={bytes_streamed}, chunks={chunk_count}, "
-                            f"error={str(e)}"
-                        )
-                        # Stop generator gracefully - don't raise exception
-                        return
-                except Exception as e:
-                    # Catch any exceptions during generator setup or cleanup
-                    logger.warning(
-                        f"[PROXY] Exception in generator setup/cleanup: type={type(e).__name__}, "
-                        f"path={path}, error={str(e)}"
-                    )
-                    # Don't raise - just stop the generator
-                    return
+            # For non-M3U8 files (segments), buffer the content to avoid partial/chunk issues
+            body = await cf_response.aread()
+            bytes_fetched = len(body)
+            logger.info(
+                f"[PROXY] Buffered segment: path={path}, bytes={bytes_fetched}, "
+                f"fetched_size_header={fetched_size}"
+            )
 
             # Build response headers
             response_headers = {
@@ -526,6 +490,7 @@ async def stream_content(
                 "Cache-Control": cf_response.headers.get("Cache-Control", ""),
                 "Access-Control-Allow-Origin": "*",
                 "X-Original-URL": cloudfront_url,  # Debug header showing original CloudFront URL
+                "Content-Length": str(bytes_fetched),
             }
             
             # Add fetched size header if available
@@ -537,28 +502,12 @@ async def stream_content(
                 response_headers["Content-Range"] = cf_response.headers["Content-Range"]
                 logger.info(f"[PROXY] Forwarding Content-Range: {cf_response.headers['Content-Range']}, path={path}")
             
-            # For streaming responses, we cannot set Content-Length because:
-            # 1. If client disconnects early, Starlette will raise "Response content shorter than Content-Length"
-            # 2. StreamingResponse uses chunked transfer encoding, which doesn't require Content-Length
-            # 3. HLS clients can work with chunked encoding just fine
-            # 
-            # We still include X-Fetched-Size header for debugging purposes
-            # Only set Content-Length for byte-range requests (206 Partial Content) where we know the exact length
-            if "Range" in request.headers and "Content-Length" in cf_response.headers:
-                # For byte-range requests, Content-Length is the length of the partial content
-                response_headers["Content-Length"] = cf_response.headers["Content-Length"]
-                logger.info(f"[PROXY] Content-Length (byte-range): {cf_response.headers['Content-Length']}, path={path}")
-            else:
-                # For full streaming responses, don't set Content-Length - use chunked transfer encoding
-                # This prevents errors when client disconnects before receiving all content
-                logger.info(f"[PROXY] Using chunked transfer encoding (no Content-Length) for streaming: path={path}")
-            
             # Set status code (206 for partial content if Range was requested)
             status_code = status.HTTP_206_PARTIAL_CONTENT if "Range" in request.headers else status.HTTP_200_OK
             logger.info(f"[PROXY] Response status: {status_code}, path={path}")
             
-            return StreamingResponse(
-                stream_generator(),
+            return Response(
+                content=body,
                 media_type=content_type,
                 status_code=status_code,
                 headers=response_headers,
