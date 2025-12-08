@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     # CloudFront Configuration
     allowed_cloudfront_domains: str = ""  # Comma-separated list
 
+    # Demo Stream Configuration
+    demo_stream_enabled: bool = True
+    demo_stream_url: str = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"  # Big Buck Bunny test stream
+    demo_stream_base_url: str = "https://test-streams.mux.dev/x36xhzz"  # Base URL for the demo stream
+
     # Server Configuration
     host: str = "0.0.0.0"
     port: int = 8000

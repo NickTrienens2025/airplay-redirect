@@ -17,6 +17,7 @@ from app.exceptions import (
 )
 from app.m3u8_rewriter import M3U8Rewriter
 from app.models import (
+    CloudFrontCookies,
     CreateSessionRequest,
     RefreshSessionRequest,
     RefreshSessionResponse,
@@ -34,11 +35,14 @@ logger = logging.getLogger(__name__)
 # Global HTTP client for CloudFront requests
 http_client: httpx.AsyncClient | None = None
 
+# Global demo session info
+demo_session: SessionResponse | None = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage application lifespan (startup and shutdown)."""
-    global http_client
+    global http_client, demo_session
 
     # Startup
     logger.info("Starting AirPlay-CloudFront HLS Proxy")
@@ -51,6 +55,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         follow_redirects=True,
     )
     logger.info(f"HTTP client initialized with timeout={settings.http_timeout_seconds}s")
+
+    # Create demo session if enabled
+    if settings.demo_stream_enabled:
+        try:
+            # Create demo session with empty cookies (public test stream)
+            demo_cookies = CloudFrontCookies(
+                CloudFront_Policy="demo",
+                CloudFront_Signature="demo",
+                CloudFront_Key_Pair_Id="demo",
+            )
+            
+            demo_session_data = session_store.create_session(
+                base_url=settings.demo_stream_base_url,
+                cookies=demo_cookies,
+                ttl=settings.session_max_ttl_seconds,  # Use max TTL for demo session
+            )
+            
+            demo_session = SessionResponse(
+                session_id=demo_session_data.session_id,
+                token=demo_session_data.token,
+                expires_at=demo_session_data.expires_at,
+            )
+            
+            logger.info(
+                f"Demo session created: session_id={demo_session.session_id}, "
+                f"token={demo_session.token[:8]}..., stream_url={settings.demo_stream_url}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create demo session: {e}")
+            demo_session = None
 
     yield
 
@@ -229,18 +263,24 @@ async def stream_content(
         f"Proxying request: token={token[:8]}..., path={path}, " f"cloudfront_url={cloudfront_url}"
     )
 
-    # Prepare cookies for CloudFront request
-    cookie_header = "; ".join(f"{k}={v}" for k, v in session_data.cookies.items())
+    # Prepare cookies for CloudFront request (skip demo cookies)
+    cookie_header = ""
+    if session_data.cookies and not all(v == "demo" for v in session_data.cookies.values()):
+        cookie_header = "; ".join(f"{k}={v}" for k, v in session_data.cookies.items())
 
     # Fetch from CloudFront
     try:
+        # Build headers (only include Cookie if we have real cookies)
+        headers = {
+            "User-Agent": request.headers.get("User-Agent", "AirPlayProxy/1.0"),
+        }
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        
         async with http_client.stream(
             "GET",
             cloudfront_url,
-            headers={
-                "Cookie": cookie_header,
-                "User-Agent": request.headers.get("User-Agent", "AirPlayProxy/1.0"),
-            },
+            headers=headers,
         ) as cf_response:
             # Check for CloudFront errors
             if cf_response.status_code >= 400:
@@ -327,10 +367,46 @@ async def health_check() -> dict:
 
 
 @app.get("/", include_in_schema=False)
-async def root() -> dict:
-    """Root endpoint with basic info."""
-    return {
+async def root(request: Request) -> dict:
+    """Root endpoint with basic info and demo stream."""
+    base_url = str(request.base_url).rstrip("/")
+    
+    response = {
         "service": "AirPlay-CloudFront HLS Proxy",
         "version": "0.1.0",
         "docs": "/docs",
     }
+    
+    # Add demo stream info if available
+    if demo_session:
+        # Extract the manifest path from the demo stream URL
+        from urllib.parse import urlparse
+        parsed_demo_url = urlparse(settings.demo_stream_url)
+        parsed_base_url = urlparse(settings.demo_stream_base_url)
+        
+        # Get the path relative to base URL
+        demo_path = parsed_demo_url.path
+        base_path = parsed_base_url.path.rstrip("/")
+        if demo_path.startswith(base_path):
+            manifest_path = demo_path[len(base_path):].lstrip("/")
+        else:
+            # Fallback: use the filename from the demo URL
+            manifest_path = demo_path.split("/")[-1] or "x36xhzz.m3u8"
+        
+        stream_url = f"{base_url}/stream/{manifest_path}?token={demo_session.token}"
+        
+        response["demo_stream"] = {
+            "enabled": True,
+            "name": "Big Buck Bunny (Test Stream)",
+            "stream_url": stream_url,
+            "session_id": demo_session.session_id,
+            "token": demo_session.token,
+            "expires_at": demo_session.expires_at.isoformat(),
+            "original_url": settings.demo_stream_url,
+        }
+    else:
+        response["demo_stream"] = {
+            "enabled": False,
+        }
+    
+    return response
