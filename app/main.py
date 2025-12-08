@@ -335,6 +335,11 @@ async def stream_content(
                     # when clients seek or stop playback
                     logger.debug(f"Stream closed by client: {path}")
                     return
+                except Exception as e:
+                    # Catch any other exceptions during streaming to prevent 502 errors
+                    # This includes ExceptionGroup which can wrap multiple exceptions
+                    logger.debug(f"Exception during streaming (likely client disconnect): {type(e).__name__}: {path}")
+                    return
 
             return StreamingResponse(
                 stream_generator(),
@@ -355,6 +360,17 @@ async def stream_content(
             status_code=status.HTTP_200_OK,
             headers={"Access-Control-Allow-Origin": "*"},
         )
+    except ExceptionGroup as eg:
+        # Handle ExceptionGroup (Python 3.11+) - check if it contains StreamClosed
+        if any(isinstance(exc, httpx.StreamClosed) for exc in eg.exceptions):
+            logger.debug(f"Stream closed by client (ExceptionGroup): {path}")
+            return Response(
+                content="",
+                status_code=status.HTTP_200_OK,
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
+        # Re-raise if it's not a StreamClosed exception
+        raise
     except httpx.TimeoutException as e:
         logger.error(f"Timeout fetching from CloudFront: {cloudfront_url}")
         return Response(
