@@ -9,19 +9,28 @@ Rewrites manifest URLs to point back through the proxy
 
 Core Components
 1. Session Management Layer
-Session Store:
-├── session_id → {
-│   ├── cookies: Dict[str, str]  # CloudFront cookies
-│   ├── created_at: datetime
-│   ├── expires_at: datetime
-│   ├── last_accessed: datetime
-│   └── metadata: Optional[Dict]
+Session Store with dual lookup:
+├── session_id → session_data  # For management operations (refresh, delete)
+├── token → session_data       # For streaming operations (fast lookup)
+│
+└── session_data: {
+    ├── session_id: str
+    ├── token: str  # Streaming authentication token
+    ├── base_url: str  # CloudFront base URL (e.g., "https://cdn.example.com/content/2025")
+    ├── cookies: Dict[str, str]  # CloudFront cookies
+    ├── created_at: datetime
+    ├── expires_at: datetime
+    ├── last_accessed: datetime
+    └── metadata: Optional[Dict]
 }
-Storage Options:
 
-Development: In-memory dict with threading.Lock
-Production: Redis for distributed sessions
-Hybrid: Redis with local LRU cache
+**Multiple Feeds:** Single session/token supports all feeds under the same base_url
+(e.g., different camera angles, audio tracks, quality levels all share one token)
+
+Storage Options:
+- Development: In-memory dict with threading.Lock
+- Production: Redis for distributed sessions
+- Hybrid: Redis with local LRU cache
 
 2. Proxy Server
 
@@ -36,11 +45,14 @@ Rewrite relative/absolute URLs to route through proxy
 Preserve query parameters and fragments
 
 API Endpoints
-POST /api/v1/session/create
-Initialize streaming session with CloudFront cookies
-Request:
-json{
-  "stream_url": "https://d123.cloudfront.net/path/master.m3u8",
+
+### POST /api/v1/session/create
+Initialize streaming session with CloudFront cookies and the base URL. A single session supports multiple feeds (e.g., different camera angles, audio tracks).
+
+**Request:**
+```json
+{
+  "base_url": "https://cdn.example.com/content/2025",
   "cookies": {
     "CloudFront-Policy": "eyJTdGF0ZW1lbnQiOlt...",
     "CloudFront-Signature": "abc123...",
@@ -48,63 +60,123 @@ json{
   },
   "ttl": 3600  // optional, seconds
 }
-Response:
-json{
+```
+
+**Response:**
+```json
+{
   "session_id": "s_a1b2c3d4e5f6",
-  "proxy_url": "http://proxy.local/stream/s_a1b2c3d4e5f6/master.m3u8",
+  "token": "t_x8y9z0a1b2c3d4e5",
   "expires_at": "2025-12-07T20:30:00Z"
 }
-GET /stream/{session_id}/{path:path}
-Proxy HLS content (playlists and segments)
-Flow:
+```
 
-Extract session_id from path
-Validate session exists and not expired
-Reconstruct original CloudFront URL
-Fetch from CloudFront with stored cookies
-If M3U8: rewrite URLs to include session_id
-Stream response to client
-Update last_accessed timestamp
+**Usage Flow:**
+1. Client app calls this endpoint with CloudFront cookies + base URL
+2. Server creates session, stores base_url, generates `session_id` (for management) and `token` (for streaming)
+3. Server returns `session_id`, `token`, and `expires_at`
+4. Client constructs proxy URLs for each feed by replacing base URL with proxy server + `/stream/`, and appending token
+   - Original feed 1: `https://cdn.example.com/content/2025/feed1_4000K.m3u8`
+   - Original feed 2: `https://cdn.example.com/content/2025/feed2_4000K.m3u8`
+   - Proxy feed 1: `https://proxy.render.com/stream/feed1_4000K.m3u8?token=t_x8y9z0a1b2c3d4e5`
+   - Proxy feed 2: `https://proxy.render.com/stream/feed2_4000K.m3u8?token=t_x8y9z0a1b2c3d4e5`
+5. Client app can pass any of the constructed proxy URLs to AirPlay device
+6. AirPlay device makes all HLS requests through the proxy using the token (transparent CloudFront auth)
+7. Single token works for all feeds under the same base URL
+8. Token decouples authentication from the content path structure
 
-DELETE /api/v1/session/{session_id}
+### PUT /api/v1/session/{session_id}/refresh
+Refresh the CloudFront cookies for an existing session (e.g., when cookies are about to expire).
+
+**Request:**
+```json
+{
+  "cookies": {
+    "CloudFront-Policy": "eyJTdGF0ZW1lbnQiOlt...",
+    "CloudFront-Signature": "new_signature...",
+    "CloudFront-Key-Pair-Id": "APKAXXXXX"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "session_id": "s_a1b2c3d4e5f6",
+  "expires_at": "2025-12-07T21:30:00Z",
+  "updated": true
+}
+```
+
+**Note:** The token remains the same; only the CloudFront cookies are updated in the session.
+
+### GET /stream/{path:path}?token={token}
+Proxy HLS content (playlists and segments). This endpoint is called by the AirPlay device, not directly by the client app.
+
+**Flow:**
+1. Extract token from query parameter
+2. Look up session by token and validate it exists and not expired
+3. Reconstruct original CloudFront URL: `{base_url}/{captured_path}` where base_url is CloudFront base (e.g., `https://cdn.example.com/content/2025/feed1_4000K.m3u8`)
+4. Fetch from CloudFront with stored cookies from the session
+5. If M3U8: rewrite all URLs to include the token query parameter and `/stream/` prefix
+6. Stream response to AirPlay device
+7. Update last_accessed timestamp on the session
+
+**Key Design Decisions:**
+- Token is passed as a query parameter, decoupling authentication from the resource path
+- Proxy URL structure mirrors CloudFront structure (just domain swap + /stream/ prefix + token)
+- Client constructs proxy URL themselves - no need for server to return it
+
+### DELETE /api/v1/session/{session_id}
 Explicitly terminate session (optional, for cleanup)
-GET /health
-Health check endpoint
+
+### GET /health
+Health check endpoint for Render
 HLS-Specific Handling
 Manifest Rewriting Logic
+
+**Key Pattern:** Token-based authentication via query parameters
+
 Master Playlist (master.m3u8):
-pythondef rewrite_master_playlist(content: str, session_id: str, base_url: str) -> str:
+```python
+def rewrite_master_playlist(content: str, token: str, proxy_base: str) -> str:
     """
     Rewrite variant stream URLs and media playlist URLs
-    
+
     Input:
     #EXTM3U
     #EXT-X-STREAM-INF:BANDWIDTH=2000000
     720p/index.m3u8
-    
+
     Output:
     #EXTM3U
     #EXT-X-STREAM-INF:BANDWIDTH=2000000
-    http://proxy.local/stream/{session_id}/720p/index.m3u8
+    /stream/720p/index.m3u8?token=t_x8y9z0a1b2c3d4e5
     """
+```
+
 Media Playlist (variant.m3u8):
-pythondef rewrite_media_playlist(content: str, session_id: str, base_url: str) -> str:
+```python
+def rewrite_media_playlist(content: str, token: str, proxy_base: str) -> str:
     """
     Rewrite segment URLs (.ts files)
-    
-    Input:
-    #EXTINF:10.0
-    segment001.ts
-    
+
+    Input (relative URLs common in video streams):
+    #EXTINF:6.00600
+    video_stream_4000K/00000/segment_00001.ts
+
     Output:
-    #EXTINF:10.0
-    http://proxy.local/stream/{session_id}/720p/segment001.ts
+    #EXTINF:6.00600
+    /stream/video_stream_4000K/00000/segment_00001.ts?token=t_x8y9z0a1b2c3d4e5
     """
 ```
 
 **Key Considerations:**
-- Handle absolute URLs (convert to proxy path)
-- Handle relative URLs (resolve against base, then proxy)
+- Handle absolute URLs (convert to proxy path with token)
+- Handle relative URLs (common in real streams - resolve against base, then proxy with token)
+- Token stays constant across all URLs in the playlist
+- Lines starting with `#` are tags (don't rewrite except `#EXT-X-KEY` URIs)
+- Non-comment lines are resource URLs (rewrite these)
 - Preserve #EXT-X-KEY encryption URLs (if present)
 - Maintain byte-range requests for segments
 - Support both VOD and Live streams

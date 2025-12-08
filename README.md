@@ -25,8 +25,9 @@ sequenceDiagram
 
     Note over App,CF: Session Creation
     App->>Proxy: POST /api/v1/session/create<br/>{stream_url, cookies}
-    Proxy->>Proxy: Generate session_id + token<br/>Store cookies + base_url
-    Proxy-->>App: {session_id, token, proxy_url}
+    Proxy->>Proxy: Generate session_id + token<br/>Store cookies + CloudFront domain
+    Proxy-->>App: {session_id, token, expires_at}
+    App->>App: Construct proxy URL<br/>(domain swap + /stream/ + token)
 
     Note over App,CF: Start AirPlay Streaming
     App->>AirPlay: Send proxy_url (with token)
@@ -63,18 +64,22 @@ sequenceDiagram
 The proxy transforms CloudFront URLs into cookieless proxy URLs with token-based authentication:
 
 ```
-Original CloudFront URL:
-https://d123.cloudfront.net/content/game123/master.m3u8
-https://d123.cloudfront.net/content/game123/720p/index.m3u8
-https://d123.cloudfront.net/content/game123/720p/segment001.ts
+Original CloudFront URLs (multiple feeds from same base):
+https://cdn.example.com/content/2025/feed1_4000K.m3u8
+https://cdn.example.com/content/2025/feed2_4000K.m3u8
+https://cdn.example.com/content/2025/feed1_4000K/720p/segment001.ts
 
-Proxied URL (with token query parameter):
-https://proxy.render.com/stream/master.m3u8?token=t_x8y9z0a1b2c3d4e5
-https://proxy.render.com/stream/720p/index.m3u8?token=t_x8y9z0a1b2c3d4e5
-https://proxy.render.com/stream/720p/segment001.ts?token=t_x8y9z0a1b2c3d4e5
+Proxied URLs (client constructs by replacing base URL + /stream/ prefix + token):
+https://proxy.render.com/stream/feed1_4000K.m3u8?token=t_x8y9z0a1b2c3d4e5
+https://proxy.render.com/stream/feed2_4000K.m3u8?token=t_x8y9z0a1b2c3d4e5
+https://proxy.render.com/stream/feed1_4000K/720p/segment001.ts?token=t_x8y9z0a1b2c3d4e5
 ```
 
-**Key Design:** The token is passed as a query parameter, keeping the content path structure clean and matching the original CloudFront layout. This decouples authentication from the resource path.
+**Key Design:**
+- Proxy URL structure mirrors CloudFront (base URL swap + `/stream/` prefix)
+- Token passed as query parameter, decoupling authentication from the resource path
+- Client constructs proxy URLs from original URLs + token (no need for server to return them)
+- **Multiple feeds supported:** One session/token works for all feeds under the same base URL (different camera angles, audio tracks, etc.)
 
 ## API Endpoints
 
@@ -84,7 +89,7 @@ POST /api/v1/session/create
 Content-Type: application/json
 
 {
-  "stream_url": "https://d123.cloudfront.net/content/game123/master.m3u8",
+  "base_url": "https://cdn.example.com/content/2025",
   "cookies": {
     "CloudFront-Policy": "eyJTdGF0ZW1lbnQiOlt...",
     "CloudFront-Signature": "abc123...",
@@ -99,12 +104,13 @@ Content-Type: application/json
 {
   "session_id": "s_a1b2c3d4e5f6",
   "token": "t_x8y9z0a1b2c3d4e5",
-  "proxy_url": "https://proxy.render.com/stream/master.m3u8?token=t_x8y9z0a1b2c3d4e5",
   "expires_at": "2025-12-07T20:30:00Z"
 }
 ```
 
-The `session_id` is used for management operations (refresh, delete), while the `token` is used for all streaming requests. The token is embedded in the `proxy_url` as a query parameter.
+The `session_id` is used for management operations (refresh, delete), while the `token` is used for all streaming requests. The client constructs proxy URLs by replacing the base URL with the proxy server + `/stream/`, and appending the token.
+
+**Multiple Feeds:** A single session/token supports multiple feeds from the same base URL (e.g., different camera angles, audio tracks, quality levels).
 
 ### Refresh Session Cookies
 ```http
@@ -141,7 +147,7 @@ GET /health
 
 ## Deployment
 
-This service is deployed to **Render** via CI/CD pipelines. The service automatically deploys when changes are pushed to the main branch.
+This service is deployed to **Render** via CI/CD pipelines using **Docker** (not docker-compose). The service automatically deploys when changes are pushed to the main branch.
 
 ### Environment Variables
 
@@ -162,24 +168,46 @@ Configure these in the Render dashboard:
 ### Local Setup
 
 ```bash
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
 # Install dependencies
 pip install -r requirements.txt
 
 # Run development server
+./run.sh
+# Or manually:
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Testing
 
 ```bash
-# Run unit tests
-pytest tests/unit
+# Activate virtual environment
+source venv/bin/activate
 
-# Run integration tests
-pytest tests/integration
+# Run all tests
+pytest
 
-# Run all tests with coverage
-pytest --cov=app tests/
+# Run tests with coverage report
+pytest --cov=app --cov-report=html
+
+# Run specific test file
+pytest tests/test_session_store.py -v
+```
+
+### Code Quality
+
+```bash
+# Format code
+black app/ tests/
+
+# Lint code
+ruff check app/ tests/
+
+# Type checking
+mypy app/
 ```
 
 ## Security

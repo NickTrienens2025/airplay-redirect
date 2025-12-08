@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: airplay-proxy
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    envVars:
+      - key: LOG_LEVEL
+        value: info
+      - key: SESSION_TTL_SECONDS
+        value: 3600
+      - key: SESSION_MAX_TTL_SECONDS
+        value: 21600
+      - key: ALLOWED_CLOUDFRONT_DOMAINS
+        sync: false  # Set this in Render dashboard
+    healthCheckPath: /health
+    autoDeploy: true

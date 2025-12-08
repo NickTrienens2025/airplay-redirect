@@ -18,9 +18,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    - Session store with two mappings:
      - `session_id` → session data (for management/refresh operations)
      - `token` → session data (for streaming requests)
-   - Session data contains: CloudFront cookies, base URL, timestamps, and metadata
+   - Session data contains: CloudFront cookies, CloudFront base URL, timestamps, and metadata
    - For MVP: In-memory storage with threading.Lock
    - Both session IDs and tokens must be cryptographically secure (use `secrets.token_urlsafe`)
+   - Store the CloudFront base URL (e.g., `https://cdn.example.com/content/2025`), not individual feed URLs
+   - Single session/token supports multiple feeds from the same base URL
 
 2. **Proxy Server**
    - Recommended: FastAPI with uvicorn (async support)
@@ -35,12 +37,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### API Endpoints
 
 #### `POST /api/v1/session/create`
-Initialize a streaming session with CloudFront cookies and the path to the m3u8 file.
+Initialize a streaming session with CloudFront cookies. The session supports multiple feeds (e.g., different camera angles, audio tracks) from the same CloudFront domain.
 
 **Request Body:**
 ```json
 {
-  "stream_url": "https://d123.cloudfront.net/content/game123/master.m3u8",
+  "base_url": "https://cdn.example.com/content/2025",
   "cookies": {
     "CloudFront-Policy": "eyJTdGF0ZW1lbnQiOlt...",
     "CloudFront-Signature": "abc123...",
@@ -55,12 +57,22 @@ Initialize a streaming session with CloudFront cookies and the path to the m3u8 
 {
   "session_id": "s_a1b2c3d4e5f6",
   "token": "t_x8y9z0a1b2c3d4e5",
-  "proxy_url": "http://proxy.local/stream/master.m3u8?token=t_x8y9z0a1b2c3d4e5",
   "expires_at": "2025-12-07T20:30:00Z"
 }
 ```
 
-The `proxy_url` is what gets passed to the AirPlay device. The authentication token is passed as a query parameter, decoupling it from the content path. All m3u8 manifests will be rewritten to include the token on URLs to segments and other playlists.
+**Client constructs proxy URLs for each feed:**
+The client constructs proxy URLs by replacing the base URL with the proxy server and adding the token. A single session/token can be used for multiple feeds:
+- Original feed 1: `https://cdn.example.com/content/2025/feed1.m3u8`
+- Original feed 2: `https://cdn.example.com/content/2025/feed2.m3u8`
+- Original feed 3: `https://cdn.example.com/content/2025/feed3.m3u8`
+
+Becomes:
+- Proxy feed 1: `https://proxy.render.com/stream/feed1.m3u8?token=t_x8y9z0a1b2c3d4e5`
+- Proxy feed 2: `https://proxy.render.com/stream/feed2.m3u8?token=t_x8y9z0a1b2c3d4e5`
+- Proxy feed 3: `https://proxy.render.com/stream/feed3.m3u8?token=t_x8y9z0a1b2c3d4e5`
+
+All feeds share the same token and CloudFront cookies. The AirPlay device can switch between feeds seamlessly.
 
 #### `PUT /api/v1/session/{session_id}/refresh`
 Refresh the CloudFront cookies for an existing session (e.g., when cookies are about to expire).
@@ -80,7 +92,6 @@ Refresh the CloudFront cookies for an existing session (e.g., when cookies are a
 ```json
 {
   "session_id": "s_a1b2c3d4e5f6",
-  "token": "t_x8y9z0a1b2c3d4e5",
   "expires_at": "2025-12-07T21:30:00Z",
   "updated": true
 }
@@ -94,9 +105,9 @@ Proxy HLS content (playlists and segments). This endpoint is called by the AirPl
 **Flow:**
 1. Extract token from query parameter
 2. Look up session by token and validate it exists and hasn't expired
-3. Reconstruct original CloudFront URL from stored base URL + captured path
+3. Reconstruct original CloudFront URL: `{base_url}/{captured_path}` (e.g., `https://cdn.example.com/content/2025` + `/` + `feed1_4000K.m3u8`)
 4. Fetch from CloudFront with stored cookies from the session
-5. If response is M3U8: rewrite all URLs to include the token query parameter and route through proxy
+5. If response is M3U8: rewrite all URLs to include the token query parameter and `/stream/` prefix
 6. Stream response to AirPlay device
 7. Update last_accessed timestamp on the session
 
@@ -110,17 +121,24 @@ Health check endpoint for Render.
 
 ```
 Original CloudFront:
-https://d123.cloudfront.net/content/game123/master.m3u8
-https://d123.cloudfront.net/content/game123/720p/index.m3u8
-https://d123.cloudfront.net/content/game123/720p/segment001.ts
+https://cdn.example.com/content/2025/feed1_4000K.m3u8
+https://cdn.example.com/content/2025/feed1_4000K/720p/index.m3u8
+https://cdn.example.com/content/2025/feed1_4000K/720p/segment001.ts
 
 Proxied structure (token-based auth):
-http://proxy.local/stream/master.m3u8?token=t_x8y9z0a1b2c3d4e5
-http://proxy.local/stream/720p/index.m3u8?token=t_x8y9z0a1b2c3d4e5
-http://proxy.local/stream/720p/segment001.ts?token=t_x8y9z0a1b2c3d4e5
+https://proxy.render.com/stream/feed1_4000K.m3u8?token=t_x8y9z0a1b2c3d4e5
+https://proxy.render.com/stream/feed1_4000K/720p/index.m3u8?token=t_x8y9z0a1b2c3d4e5
+https://proxy.render.com/stream/feed1_4000K/720p/segment001.ts?token=t_x8y9z0a1b2c3d4e5
 ```
 
-The token is passed as a query parameter, keeping the content path clean and matching the original CloudFront structure. Store both the base CloudFront URL and the token in the session, using the token as the lookup key.
+The proxy URL mirrors the CloudFront URL structure with:
+- CloudFront base URL replaced with proxy domain + `/stream/`
+- Token query parameter appended
+- Path after base URL is preserved
+
+The server stores the CloudFront base URL (e.g., `https://cdn.example.com/content/2025`) and reconstructs original URLs by: `base_url + "/" + (path after /stream/)`. The token is used as the lookup key for the session.
+
+**Multiple Feeds:** A single session/token can proxy multiple feeds from the same CloudFront base URL, allowing seamless switching between camera angles, audio tracks, etc.
 
 ## HLS-Specific Requirements
 
@@ -234,6 +252,11 @@ Log per request:
 ## Deployment
 
 This service is deployed to **Render** via CI/CD pipelines.
+
+### Docker
+- Use **Docker** for containerization (not docker-compose)
+- Single Dockerfile for the application
+- Render will build and deploy from the Dockerfile
 
 ### Render Configuration
 - Service will be deployed as a web service on Render
