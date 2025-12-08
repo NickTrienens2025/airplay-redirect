@@ -494,6 +494,7 @@ async def stream_content(
                 "Accept-Ranges": cf_response.headers.get("Accept-Ranges", "bytes"),
                 "Cache-Control": cf_response.headers.get("Cache-Control", ""),
                 "Access-Control-Allow-Origin": "*",
+                "X-Original-URL": cloudfront_url,  # Debug header showing original CloudFront URL
             }
             
             # Forward Content-Range header for byte-range responses
