@@ -342,6 +342,14 @@ async def stream_content(
                 },
             )
 
+    except httpx.StreamClosed:
+        # Client disconnected during streaming - this is normal for HLS
+        logger.debug(f"Stream closed by client during request: {path}")
+        return Response(
+            content="",
+            status_code=status.HTTP_200_OK,
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
     except httpx.TimeoutException as e:
         logger.error(f"Timeout fetching from CloudFront: {cloudfront_url}")
         return Response(
