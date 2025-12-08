@@ -535,13 +535,23 @@ async def websocket_logs(websocket: WebSocket):
             except Exception:
                 break
         
-        # Keep connection alive and handle disconnects
+        # Keep connection alive - wait for client disconnect
+        # Use receive() with timeout to detect disconnects without blocking
         while True:
             try:
-                # Wait for ping/pong or just keep connection alive
-                await asyncio.sleep(1)
-                await websocket.receive_text()  # This will raise on disconnect
+                # Wait for any message (or disconnect) with timeout
+                # If client sends ping, we'll receive it; if disconnect, exception is raised
+                await asyncio.wait_for(websocket.receive(), timeout=30.0)
+            except asyncio.TimeoutError:
+                # Send ping to keep connection alive
+                try:
+                    await websocket.send_json({"type": "ping"})
+                except Exception:
+                    break
             except WebSocketDisconnect:
+                break
+            except Exception as e:
+                logger.debug(f"[WS] Connection error: {e}")
                 break
     except Exception as e:
         logger.debug(f"[WS] Connection error: {e}")

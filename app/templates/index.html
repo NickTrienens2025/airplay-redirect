@@ -250,6 +250,7 @@
                 ws = new WebSocket(wsUrl);
                 
                 ws.onopen = () => {
+                    console.log('WebSocket connected');
                     logsStatus.textContent = 'Connected';
                     logsStatus.className = 'logs-status connected';
                     logsContainer.innerHTML = '<div class="log-entry info">Connected to log stream. Waiting for logs...</div>';
@@ -258,8 +259,12 @@
                 
                 ws.onmessage = (event) => {
                     try {
-                        const logEntry = JSON.parse(event.data);
-                        addLogEntry(logEntry);
+                        const data = JSON.parse(event.data);
+                        // Ignore ping messages
+                        if (data.type === 'ping') {
+                            return;
+                        }
+                        addLogEntry(data);
                     } catch (e) {
                         console.error('Failed to parse log entry:', e);
                     }
@@ -269,11 +274,28 @@
                     console.error('WebSocket error:', error);
                     logsStatus.textContent = 'Error';
                     logsStatus.className = 'logs-status disconnected';
+                    // Add error message to logs
+                    const errorEntry = {
+                        timestamp: new Date().toISOString(),
+                        level: 'ERROR',
+                        logger: 'websocket',
+                        message: `WebSocket connection error: ${error.message || 'Unknown error'}`
+                    };
+                    addLogEntry(errorEntry);
                 };
                 
-                ws.onclose = () => {
+                ws.onclose = (event) => {
+                    console.log('WebSocket closed:', event.code, event.reason);
                     logsStatus.textContent = 'Disconnected';
                     logsStatus.className = 'logs-status disconnected';
+                    // Add disconnect message to logs
+                    const disconnectEntry = {
+                        timestamp: new Date().toISOString(),
+                        level: 'WARNING',
+                        logger: 'websocket',
+                        message: `WebSocket disconnected (code: ${event.code}, reason: ${event.reason || 'none'}). Reconnecting...`
+                    };
+                    addLogEntry(disconnectEntry);
                     // Attempt to reconnect after 3 seconds
                     setTimeout(connectWebSocket, 3000);
                 };
