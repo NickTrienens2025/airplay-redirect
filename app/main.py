@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import AsyncGenerator, Set
 
 import httpx
-from fastapi import BackgroundTask, FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from app.config import settings
