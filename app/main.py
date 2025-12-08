@@ -194,7 +194,12 @@ async def runtime_error_handler(request: Request, exc: RuntimeError):
     Handle RuntimeError exceptions, particularly "response already started" errors.
     
     These occur when exceptions happen during streaming after headers are sent.
+    Note: This handler only applies to HTTP requests, not WebSocket connections.
     """
+    # Skip WebSocket connections - they have their own error handling
+    if request.url.path.startswith("/ws/"):
+        raise exc
+    
     if "response already started" in str(exc).lower():
         logger.debug(f"Response already started, suppressing RuntimeError: {request.url.path}")
         # Suppress the exception - can't return new response when streaming has started
