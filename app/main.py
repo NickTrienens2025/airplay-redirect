@@ -169,7 +169,12 @@ async def exception_group_handler(request: Request, exc: ExceptionGroup):
     These can happen when clients disconnect during streaming, causing
     StreamClosed exceptions to be wrapped in ExceptionGroup by Starlette's
     TaskGroup handling.
+    Note: This handler only applies to HTTP requests, not WebSocket connections.
     """
+    # Skip WebSocket connections - they have their own error handling
+    if request.url.path.startswith("/ws/"):
+        raise exc
+    
     # Check if any exception in the group is a StreamClosed exception
     if any(isinstance(e, httpx.StreamClosed) for e in exc.exceptions):
         logger.debug(f"Stream closed by client (ExceptionGroup handler): {request.url.path}")
