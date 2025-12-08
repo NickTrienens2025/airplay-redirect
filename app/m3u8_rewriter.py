@@ -10,7 +10,7 @@ class M3U8Rewriter:
     # Pattern to match URI attribute in #EXT-X-KEY tags
     URI_PATTERN = re.compile(r'URI="([^"]+)"')
 
-    def __init__(self, token: str, session_base_url: str, proxy_base: str = "/stream"):
+    def __init__(self, token: str, session_base_url: str, proxy_base: str = "/stream", proxy_base_url: str | None = None):
         """
         Initialize the rewriter.
 
@@ -18,10 +18,13 @@ class M3U8Rewriter:
             token: Authentication token to append to URLs
             session_base_url: Session's CloudFront base URL (e.g., "https://cdn.example.com/content/2025")
             proxy_base: Base path for proxied requests (default: "/stream")
+            proxy_base_url: Full base URL of the proxy server (e.g., "https://proxy.example.com")
+                           If provided, generates absolute URLs instead of relative ones
         """
         self.token = token
         self.session_base_url = session_base_url.rstrip("/")
         self.proxy_base = proxy_base.rstrip("/")
+        self.proxy_base_url = proxy_base_url.rstrip("/") if proxy_base_url else None
 
     def rewrite_manifest(self, content: str, base_url: str) -> str:
         """
@@ -140,10 +143,18 @@ class M3U8Rewriter:
         existing_query["token"] = [self.token]
         query_string = urlencode(existing_query, doseq=True)
 
-        # Return proxied URL (relative path from proxy's perspective)
-        if query_string:
-            return f"{proxied_path}?{query_string}"
-        return proxied_path
+        # Build full URL (absolute if proxy_base_url provided, otherwise relative)
+        if self.proxy_base_url:
+            # Generate absolute URL
+            full_url = f"{self.proxy_base_url}{proxied_path}"
+            if query_string:
+                return f"{full_url}?{query_string}"
+            return full_url
+        else:
+            # Return relative URL
+            if query_string:
+                return f"{proxied_path}?{query_string}"
+            return proxied_path
 
     @staticmethod
     def extract_path_from_proxy_url(proxy_path: str) -> str:

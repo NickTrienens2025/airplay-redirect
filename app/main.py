@@ -303,8 +303,13 @@ async def stream_content(
                 manifest_content = await cf_response.aread()
                 manifest_text = manifest_content.decode("utf-8")
 
-                # Rewrite URLs in manifest
-                rewriter = M3U8Rewriter(token=token, session_base_url=session_data.base_url)
+                # Rewrite URLs in manifest (use absolute URLs for better browser compatibility)
+                proxy_base_url = str(request.base_url).rstrip("/")
+                rewriter = M3U8Rewriter(
+                    token=token,
+                    session_base_url=session_data.base_url,
+                    proxy_base_url=proxy_base_url,
+                )
                 rewritten_manifest = rewriter.rewrite_manifest(
                     manifest_text,
                     base_url=cloudfront_url,
