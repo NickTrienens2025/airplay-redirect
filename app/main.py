@@ -182,10 +182,18 @@ async def exception_group_handler(request: Request, exc: ExceptionGroup):
         # Starlette will handle cleanup for streaming responses
         return
     
-    # Check for RuntimeError about response already started
-    if any("response already started" in str(e).lower() for e in exc.exceptions):
-        logger.debug(f"Response already started, suppressing ExceptionGroup: {request.url.path}")
+    # Check for RuntimeError about response already started or Content-Length mismatch
+    if any(
+        "response already started" in str(e).lower() or 
+        "response content shorter than content-length" in str(e).lower()
+        for e in exc.exceptions
+    ):
+        logger.debug(
+            f"Response error (already started or Content-Length mismatch), "
+            f"suppressing ExceptionGroup: {request.url.path}"
+        )
         # Suppress the exception - can't return new response when streaming has started
+        # Content-Length mismatch happens when client disconnects early, which is normal for HLS
         return
     
     # If it's not a StreamClosed exception, log and re-raise
