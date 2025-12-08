@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AirPlay-CloudFront HLS Proxy</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 2em;
+            margin-bottom: 10px;
+        }
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+        .content {
+            padding: 30px;
+        }
+        .section {
+            margin-bottom: 30px;
+        }
+        .section h2 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 1.5em;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+        .video-container {
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+        video {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .json-container {
+            background: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            overflow-x: auto;
+        }
+        pre {
+            margin: 0;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.9em;
+            line-height: 1.5;
+        }
+        .info-box {
+            background: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .info-box p {
+            margin: 5px 0;
+        }
+        .info-box strong {
+            color: #1976d2;
+        }
+        .no-stream {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+            font-style: italic;
+        }
+        .links {
+            margin-top: 20px;
+            text-align: center;
+        }
+        .links a {
+            color: #667eea;
+            text-decoration: none;
+            margin: 0 15px;
+            font-weight: 500;
+        }
+        .links a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎬 AirPlay-CloudFront HLS Proxy</h1>
+            <p>Stream HLS content with token-based authentication</p>
+        </div>
+        <div class="content">
+            {{video_section}}
+            
+            <div class="section">
+                <h2>📋 API Response (JSON)</h2>
+                <div class="json-container">
+                    <pre id="json-display">{{json_str}}</pre>
+                </div>
+            </div>
+            
+            <div class="links">
+                <a href="/docs">API Documentation</a>
+                <a href="/health">Health Check</a>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Safari and modern browsers support native HLS playback
+        const video = document.getElementById('hls-player');
+        if (video) {
+            // Ensure autoplay is disabled
+            video.autoplay = false;
+            
+            // Handle HLS.js fallback for browsers that don't support native HLS
+            if (video.canPlayType('application/vnd.apple.mpegurl') === '' && typeof Hls !== 'undefined') {
+                const hls = new Hls();
+                hls.loadSource('{{stream_url}}');
+                hls.attachMedia(video);
+            }
+        }
+    </script>
+</body>
+</html>
+

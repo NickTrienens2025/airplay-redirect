@@ -7,7 +7,7 @@ from typing import AsyncGenerator
 
 import httpx
 from fastapi import FastAPI, Query, Request, Response, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from app.config import settings
 from app.exceptions import (
@@ -373,15 +373,18 @@ async def health_check() -> dict:
 
 
 @app.get("/", include_in_schema=False)
-async def root(request: Request) -> dict:
-    """Root endpoint with basic info and demo stream."""
+async def root(request: Request) -> HTMLResponse:
+    """Root endpoint with HLS player page and demo stream info."""
     base_url = str(request.base_url).rstrip("/")
     
-    response = {
+    response_data = {
         "service": "AirPlay-CloudFront HLS Proxy",
         "version": "0.1.0",
         "docs": "/docs",
     }
+    
+    stream_url = None
+    demo_info = None
     
     # Add demo stream info if available
     if demo_session:
@@ -401,7 +404,7 @@ async def root(request: Request) -> dict:
         
         stream_url = f"{base_url}/stream/{manifest_path}?token={demo_session.token}"
         
-        response["demo_stream"] = {
+        demo_info = {
             "enabled": True,
             "name": "Big Buck Bunny (Test Stream)",
             "stream_url": stream_url,
@@ -410,9 +413,51 @@ async def root(request: Request) -> dict:
             "expires_at": demo_session.expires_at.isoformat(),
             "original_url": settings.demo_stream_url,
         }
+        response_data["demo_stream"] = demo_info
     else:
-        response["demo_stream"] = {
-            "enabled": False,
-        }
+        response_data["demo_stream"] = {"enabled": False}
     
-    return response
+    # Load HTML template
+    template_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
+    with open(template_path, "r") as f:
+        html_template = f.read()
+    
+    # Build video player section
+    import json
+    json_str = json.dumps(response_data, indent=2)
+    
+    video_section = ""
+    if stream_url and demo_info:
+        video_section = f"""
+            <div class="section">
+                <h2>📺 Video Player</h2>
+                <div class="video-container">
+                    <video id="hls-player" controls preload="metadata">
+                        <source src="{stream_url}" type="application/vnd.apple.mpegurl">
+                        Your browser does not support the video tag or HLS playback.
+                    </video>
+                </div>
+                <div class="info-box">
+                    <p><strong>Stream:</strong> {demo_info['name']}</p>
+                    <p><strong>Stream URL:</strong> <code>{stream_url}</code></p>
+                    <p><strong>Session ID:</strong> <code>{demo_info['session_id']}</code></p>
+                    <p><strong>Expires At:</strong> {demo_info['expires_at']}</p>
+                </div>
+            </div>
+        """
+    elif not stream_url:
+        video_section = """
+            <div class="section">
+                <h2>📺 Video Player</h2>
+                <div class="no-stream">
+                    <p>Demo stream is not available. Please check the service configuration.</p>
+                </div>
+            </div>
+        """
+    
+    # Replace template variables
+    html_content = html_template.replace("{{video_section}}", video_section)
+    html_content = html_content.replace("{{json_str}}", json_str)
+    html_content = html_content.replace("{{stream_url}}", stream_url if stream_url else "")
+    
+    return HTMLResponse(content=html_content)
