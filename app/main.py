@@ -162,7 +162,7 @@ app = FastAPI(
 
 
 @app.exception_handler(ExceptionGroup)
-async def exception_group_handler(request: Request, exc: ExceptionGroup) -> Response:
+async def exception_group_handler(request: Request, exc: ExceptionGroup):
     """
     Handle ExceptionGroup exceptions that occur during streaming responses.
     
@@ -173,14 +173,33 @@ async def exception_group_handler(request: Request, exc: ExceptionGroup) -> Resp
     # Check if any exception in the group is a StreamClosed exception
     if any(isinstance(e, httpx.StreamClosed) for e in exc.exceptions):
         logger.debug(f"Stream closed by client (ExceptionGroup handler): {request.url.path}")
-        return Response(
-            content="",
-            status_code=status.HTTP_200_OK,
-            headers={"Access-Control-Allow-Origin": "*"},
-        )
+        # Suppress the exception - response may have already started
+        # Starlette will handle cleanup for streaming responses
+        return
+    
+    # Check for RuntimeError about response already started
+    if any("response already started" in str(e).lower() for e in exc.exceptions):
+        logger.debug(f"Response already started, suppressing ExceptionGroup: {request.url.path}")
+        # Suppress the exception - can't return new response when streaming has started
+        return
     
     # If it's not a StreamClosed exception, log and re-raise
     logger.error(f"Unhandled ExceptionGroup: {exc}")
+    raise exc
+
+
+@app.exception_handler(RuntimeError)
+async def runtime_error_handler(request: Request, exc: RuntimeError):
+    """
+    Handle RuntimeError exceptions, particularly "response already started" errors.
+    
+    These occur when exceptions happen during streaming after headers are sent.
+    """
+    if "response already started" in str(exc).lower():
+        logger.debug(f"Response already started, suppressing RuntimeError: {request.url.path}")
+        # Suppress the exception - can't return new response when streaming has started
+        return
+    # Re-raise if it's not about response already started
     raise exc
 
 
@@ -433,30 +452,41 @@ async def stream_content(
                 chunk_count = 0
                 try:
                     logger.info(f"[PROXY] Starting stream: path={path}")
-                    async for chunk in cf_response.aiter_bytes(chunk_size=8192):
-                        bytes_streamed += len(chunk)
-                        chunk_count += 1
-                        yield chunk
-                    logger.info(
-                        f"[PROXY] Stream complete: path={path}, "
-                        f"bytes={bytes_streamed}, chunks={chunk_count}"
-                    )
-                except httpx.StreamClosed:
-                    # Client disconnected early - this is normal for HLS streaming
-                    # when clients seek or stop playback
-                    logger.info(
-                        f"[PROXY] Stream closed by client: path={path}, "
-                        f"bytes_streamed={bytes_streamed}, chunks={chunk_count}"
-                    )
-                    return
+                    try:
+                        async for chunk in cf_response.aiter_bytes(chunk_size=8192):
+                            bytes_streamed += len(chunk)
+                            chunk_count += 1
+                            yield chunk
+                        logger.info(
+                            f"[PROXY] Stream complete: path={path}, "
+                            f"bytes={bytes_streamed}, chunks={chunk_count}"
+                        )
+                    except httpx.StreamClosed:
+                        # Client disconnected early - this is normal for HLS streaming
+                        # when clients seek or stop playback
+                        logger.info(
+                            f"[PROXY] Stream closed by client: path={path}, "
+                            f"bytes_streamed={bytes_streamed}, chunks={chunk_count}"
+                        )
+                        # Stop generator gracefully - don't raise exception
+                        return
+                    except Exception as e:
+                        # Catch any other exceptions during streaming to prevent 502 errors
+                        # This includes ExceptionGroup which can wrap multiple exceptions
+                        logger.warning(
+                            f"[PROXY] Exception during streaming: type={type(e).__name__}, "
+                            f"path={path}, bytes_streamed={bytes_streamed}, chunks={chunk_count}, "
+                            f"error={str(e)}"
+                        )
+                        # Stop generator gracefully - don't raise exception
+                        return
                 except Exception as e:
-                    # Catch any other exceptions during streaming to prevent 502 errors
-                    # This includes ExceptionGroup which can wrap multiple exceptions
+                    # Catch any exceptions during generator setup or cleanup
                     logger.warning(
-                        f"[PROXY] Exception during streaming: type={type(e).__name__}, "
-                        f"path={path}, bytes_streamed={bytes_streamed}, chunks={chunk_count}, "
-                        f"error={str(e)}"
+                        f"[PROXY] Exception in generator setup/cleanup: type={type(e).__name__}, "
+                        f"path={path}, error={str(e)}"
                     )
+                    # Don't raise - just stop the generator
                     return
 
             # Build response headers
