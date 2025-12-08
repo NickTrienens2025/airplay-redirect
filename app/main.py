@@ -524,15 +524,11 @@ async def stream_content(
                 response_headers["Content-Range"] = cf_response.headers["Content-Range"]
                 logger.info(f"[PROXY] Forwarding Content-Range: {cf_response.headers['Content-Range']}, path={path}")
             
-            # For streaming responses, we use Transfer-Encoding: chunked instead of Content-Length
-            # This allows the client to disconnect early without causing "Response content shorter than Content-Length" errors
-            # Only set Content-Length for byte-range responses (206 Partial Content) where we know the exact length
-            if "Range" in request.headers and "Content-Length" in cf_response.headers:
-                # For byte-range requests, Content-Length is the length of the partial content
+            # Forward Content-Length from CloudFront response
+            # This tells the client the expected size of the file
+            if "Content-Length" in cf_response.headers:
                 response_headers["Content-Length"] = cf_response.headers["Content-Length"]
-                logger.info(f"[PROXY] Content-Length (byte-range): {cf_response.headers['Content-Length']}, path={path}")
-            # For full responses, don't set Content-Length - use chunked transfer encoding
-            # This prevents errors when client disconnects before receiving all content
+                logger.info(f"[PROXY] Content-Length: {cf_response.headers['Content-Length']}, path={path}")
             
             # Set status code (206 for partial content if Range was requested)
             status_code = status.HTTP_206_PARTIAL_CONTENT if "Range" in request.headers else status.HTTP_200_OK
