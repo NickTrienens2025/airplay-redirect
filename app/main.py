@@ -322,8 +322,14 @@ async def stream_content(
             # For non-M3U8 files (segments), stream directly
             async def stream_generator() -> AsyncGenerator[bytes, None]:
                 """Stream content in chunks."""
-                async for chunk in cf_response.aiter_bytes(chunk_size=8192):
-                    yield chunk
+                try:
+                    async for chunk in cf_response.aiter_bytes(chunk_size=8192):
+                        yield chunk
+                except httpx.StreamClosed:
+                    # Client disconnected early - this is normal for HLS streaming
+                    # when clients seek or stop playback
+                    logger.debug(f"Stream closed by client: {path}")
+                    return
 
             return StreamingResponse(
                 stream_generator(),
