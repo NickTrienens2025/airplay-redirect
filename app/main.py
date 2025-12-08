@@ -2,11 +2,14 @@
 
 import logging
 import os
+import asyncio
+from collections import deque
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from datetime import datetime
+from typing import AsyncGenerator, Set
 
 import httpx
-from fastapi import FastAPI, Query, Request, Response, status
+from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from app.config import settings
@@ -32,11 +35,62 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+class WebSocketLogHandler(logging.Handler):
+    """Custom logging handler that broadcasts logs to WebSocket connections."""
+    
+    def emit(self, record: logging.LogRecord) -> None:
+        """Emit a log record to all WebSocket connections."""
+        try:
+            log_entry = {
+                "timestamp": datetime.now().isoformat(),
+                "level": record.levelname,
+                "logger": record.name,
+                "message": self.format(record),
+            }
+            # Add to buffer
+            log_buffer.append(log_entry)
+            # Broadcast to all WebSocket connections (non-blocking)
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(self._broadcast(log_entry))
+                else:
+                    loop.run_until_complete(self._broadcast(log_entry))
+            except RuntimeError:
+                # No event loop, skip broadcasting
+                pass
+        except Exception:
+            pass  # Don't let logging errors break the app
+    
+    async def _broadcast(self, log_entry: dict) -> None:
+        """Broadcast log entry to all connected WebSockets."""
+        disconnected = set()
+        for ws in websocket_connections:
+            try:
+                await ws.send_json(log_entry)
+            except Exception:
+                disconnected.add(ws)
+        # Remove disconnected connections
+        websocket_connections.difference_update(disconnected)
+
+
+# Add WebSocket log handler
+ws_handler = WebSocketLogHandler()
+ws_handler.setLevel(logging.DEBUG)
+logger.addHandler(ws_handler)
+
 # Global HTTP client for CloudFront requests
 http_client: httpx.AsyncClient | None = None
 
 # Global demo session info
 demo_session: SessionResponse | None = None
+
+# WebSocket connections for log streaming
+websocket_connections: Set[WebSocket] = set()
+
+# In-memory log buffer (last 1000 log entries)
+log_buffer: deque = deque(maxlen=1000)
 
 
 @asynccontextmanager
@@ -286,7 +340,9 @@ async def stream_content(
     cloudfront_url = f"{session_data.base_url}/{path}"
 
     logger.info(
-        f"Proxying request: token={token[:8]}..., path={path}, " f"cloudfront_url={cloudfront_url}"
+        f"[PROXY] Request: path={path}, token={token[:8]}..., "
+        f"cloudfront_url={cloudfront_url}, method={request.method}, "
+        f"client_ip={request.client.host if request.client else 'unknown'}"
     )
 
     # Prepare cookies for CloudFront request (skip demo cookies)
@@ -306,17 +362,26 @@ async def stream_content(
         # Forward Range header for byte-range requests (required for #EXT-X-BYTERANGE)
         if "Range" in request.headers:
             headers["Range"] = request.headers["Range"]
-            logger.debug(f"Forwarding Range header: {request.headers['Range']}")
+            logger.info(f"[PROXY] Forwarding Range header: {request.headers['Range']}")
         
+        logger.info(f"[PROXY] Request headers: {list(headers.keys())}")
+        
+        logger.info(f"[PROXY] Fetching from CloudFront: {cloudfront_url}")
         async with http_client.stream(
             "GET",
             cloudfront_url,
             headers=headers,
         ) as cf_response:
+            logger.info(
+                f"[PROXY] CloudFront response: status={cf_response.status_code}, "
+                f"headers={dict(cf_response.headers)}, path={path}"
+            )
+            
             # Check for CloudFront errors
             if cf_response.status_code >= 400:
                 logger.error(
-                    f"CloudFront error: status={cf_response.status_code}, " f"url={cloudfront_url}"
+                    f"[PROXY] CloudFront error: status={cf_response.status_code}, "
+                    f"url={cloudfront_url}, path={path}"
                 )
                 raise CloudFrontError(
                     status_code=cf_response.status_code,
@@ -325,14 +390,19 @@ async def stream_content(
 
             # Determine content type
             content_type = cf_response.headers.get("Content-Type") or _get_content_type(path)
+            logger.info(f"[PROXY] Content type: {content_type}, path={path}")
 
             # For M3U8 files, rewrite the manifest
             if path.endswith(".m3u8"):
-                logger.debug(f"Rewriting M3U8 manifest: {path}")
+                logger.info(f"[PROXY] Rewriting M3U8 manifest: {path}")
 
                 # Read entire manifest (they're typically small)
                 manifest_content = await cf_response.aread()
+                manifest_size = len(manifest_content)
+                logger.info(f"[PROXY] Manifest size: {manifest_size} bytes, path={path}")
+                
                 manifest_text = manifest_content.decode("utf-8")
+                logger.debug(f"[PROXY] Manifest preview (first 200 chars): {manifest_text[:200]}")
 
                 # Rewrite URLs in manifest (use absolute URLs for better browser compatibility)
                 proxy_base_url = str(request.base_url).rstrip("/")
@@ -345,6 +415,7 @@ async def stream_content(
                     manifest_text,
                     base_url=cloudfront_url,
                 )
+                logger.info(f"[PROXY] Manifest rewritten: {len(rewritten_manifest)} bytes, path={path}")
 
                 return Response(
                     content=rewritten_manifest,
@@ -358,18 +429,34 @@ async def stream_content(
             # For non-M3U8 files (segments), stream directly
             async def stream_generator() -> AsyncGenerator[bytes, None]:
                 """Stream content in chunks."""
+                bytes_streamed = 0
+                chunk_count = 0
                 try:
+                    logger.info(f"[PROXY] Starting stream: path={path}")
                     async for chunk in cf_response.aiter_bytes(chunk_size=8192):
+                        bytes_streamed += len(chunk)
+                        chunk_count += 1
                         yield chunk
+                    logger.info(
+                        f"[PROXY] Stream complete: path={path}, "
+                        f"bytes={bytes_streamed}, chunks={chunk_count}"
+                    )
                 except httpx.StreamClosed:
                     # Client disconnected early - this is normal for HLS streaming
                     # when clients seek or stop playback
-                    logger.debug(f"Stream closed by client: {path}")
+                    logger.info(
+                        f"[PROXY] Stream closed by client: path={path}, "
+                        f"bytes_streamed={bytes_streamed}, chunks={chunk_count}"
+                    )
                     return
                 except Exception as e:
                     # Catch any other exceptions during streaming to prevent 502 errors
                     # This includes ExceptionGroup which can wrap multiple exceptions
-                    logger.debug(f"Exception during streaming (likely client disconnect): {type(e).__name__}: {path}")
+                    logger.warning(
+                        f"[PROXY] Exception during streaming: type={type(e).__name__}, "
+                        f"path={path}, bytes_streamed={bytes_streamed}, chunks={chunk_count}, "
+                        f"error={str(e)}"
+                    )
                     return
 
             # Build response headers
@@ -382,14 +469,16 @@ async def stream_content(
             # Forward Content-Range header for byte-range responses
             if "Content-Range" in cf_response.headers:
                 response_headers["Content-Range"] = cf_response.headers["Content-Range"]
-                logger.debug(f"Forwarding Content-Range: {cf_response.headers['Content-Range']}")
+                logger.info(f"[PROXY] Forwarding Content-Range: {cf_response.headers['Content-Range']}, path={path}")
             
             # Forward Content-Length (important for byte-range responses)
             if "Content-Length" in cf_response.headers:
                 response_headers["Content-Length"] = cf_response.headers["Content-Length"]
+                logger.info(f"[PROXY] Content-Length: {cf_response.headers['Content-Length']}, path={path}")
             
             # Set status code (206 for partial content if Range was requested)
             status_code = status.HTTP_206_PARTIAL_CONTENT if "Range" in request.headers else status.HTTP_200_OK
+            logger.info(f"[PROXY] Response status: {status_code}, path={path}")
             
             return StreamingResponse(
                 stream_generator(),
@@ -429,6 +518,36 @@ async def stream_content(
             content="Bad gateway",
             status_code=status.HTTP_502_BAD_GATEWAY,
         )
+
+
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket):
+    """WebSocket endpoint for streaming logs to clients."""
+    await websocket.accept()
+    websocket_connections.add(websocket)
+    logger.info(f"[WS] Client connected: {len(websocket_connections)} total connections")
+    
+    try:
+        # Send buffered logs first
+        for log_entry in log_buffer:
+            try:
+                await websocket.send_json(log_entry)
+            except Exception:
+                break
+        
+        # Keep connection alive and handle disconnects
+        while True:
+            try:
+                # Wait for ping/pong or just keep connection alive
+                await asyncio.sleep(1)
+                await websocket.receive_text()  # This will raise on disconnect
+            except WebSocketDisconnect:
+                break
+    except Exception as e:
+        logger.debug(f"[WS] Connection error: {e}")
+    finally:
+        websocket_connections.discard(websocket)
+        logger.info(f"[WS] Client disconnected: {len(websocket_connections)} remaining connections")
 
 
 @app.get(

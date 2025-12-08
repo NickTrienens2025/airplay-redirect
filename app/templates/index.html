@@ -109,6 +109,56 @@
         .links a:hover {
             text-decoration: underline;
         }
+        .logs-container {
+            background: #1e1e1e;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.85em;
+            line-height: 1.4;
+        }
+        .log-entry {
+            margin-bottom: 4px;
+            padding: 2px 0;
+            word-wrap: break-word;
+        }
+        .log-entry.debug { color: #888; }
+        .log-entry.info { color: #4CAF50; }
+        .log-entry.warning { color: #FF9800; }
+        .log-entry.error { color: #F44336; }
+        .log-entry.critical { color: #E91E63; }
+        .log-timestamp {
+            color: #888;
+            margin-right: 8px;
+        }
+        .log-level {
+            font-weight: bold;
+            margin-right: 8px;
+            min-width: 60px;
+            display: inline-block;
+        }
+        .log-message {
+            color: #fff;
+        }
+        .logs-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .logs-status {
+            font-size: 0.9em;
+            color: #666;
+        }
+        .logs-status.connected {
+            color: #4CAF50;
+        }
+        .logs-status.disconnected {
+            color: #F44336;
+        }
     </style>
 </head>
 <body>
@@ -124,6 +174,16 @@
                 <h2>📋 API Response (JSON)</h2>
                 <div class="json-container">
                     <pre id="json-display">{{json_str}}</pre>
+                </div>
+            </div>
+            
+            <div class="section">
+                <div class="logs-header">
+                    <h2>📊 Proxy Logs (Live)</h2>
+                    <span id="logs-status" class="logs-status disconnected">Disconnected</span>
+                </div>
+                <div class="logs-container" id="logs-container">
+                    <div class="log-entry info">Connecting to log stream...</div>
                 </div>
             </div>
             
@@ -148,6 +208,85 @@
                 hls.attachMedia(video);
             }
         }
+        
+        // WebSocket log streaming
+        const logsContainer = document.getElementById('logs-container');
+        const logsStatus = document.getElementById('logs-status');
+        let ws = null;
+        let logCount = 0;
+        const maxLogs = 500;
+        
+        function addLogEntry(logEntry) {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${logEntry.level.toLowerCase()}`;
+            
+            const timestamp = new Date(logEntry.timestamp).toLocaleTimeString();
+            entry.innerHTML = `
+                <span class="log-timestamp">${timestamp}</span>
+                <span class="log-level">[${logEntry.level}]</span>
+                <span class="log-message">${escapeHtml(logEntry.message)}</span>
+            `;
+            
+            logsContainer.insertBefore(entry, logsContainer.firstChild);
+            logCount++;
+            
+            // Limit number of displayed logs
+            while (logsContainer.children.length > maxLogs) {
+                logsContainer.removeChild(logsContainer.lastChild);
+            }
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/logs`;
+            
+            try {
+                ws = new WebSocket(wsUrl);
+                
+                ws.onopen = () => {
+                    logsStatus.textContent = 'Connected';
+                    logsStatus.className = 'logs-status connected';
+                    logsContainer.innerHTML = '<div class="log-entry info">Connected to log stream. Waiting for logs...</div>';
+                    logCount = 0;
+                };
+                
+                ws.onmessage = (event) => {
+                    try {
+                        const logEntry = JSON.parse(event.data);
+                        addLogEntry(logEntry);
+                    } catch (e) {
+                        console.error('Failed to parse log entry:', e);
+                    }
+                };
+                
+                ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    logsStatus.textContent = 'Error';
+                    logsStatus.className = 'logs-status disconnected';
+                };
+                
+                ws.onclose = () => {
+                    logsStatus.textContent = 'Disconnected';
+                    logsStatus.className = 'logs-status disconnected';
+                    // Attempt to reconnect after 3 seconds
+                    setTimeout(connectWebSocket, 3000);
+                };
+            } catch (e) {
+                console.error('Failed to create WebSocket:', e);
+                logsStatus.textContent = 'Failed';
+                logsStatus.className = 'logs-status disconnected';
+                setTimeout(connectWebSocket, 3000);
+            }
+        }
+        
+        // Connect on page load
+        connectWebSocket();
     </script>
 </body>
 </html>
