@@ -537,11 +537,21 @@ async def stream_content(
                 response_headers["Content-Range"] = cf_response.headers["Content-Range"]
                 logger.info(f"[PROXY] Forwarding Content-Range: {cf_response.headers['Content-Range']}, path={path}")
             
-            # Forward Content-Length from CloudFront response
-            # This tells the client the expected size of the file
-            if "Content-Length" in cf_response.headers:
+            # For streaming responses, we cannot set Content-Length because:
+            # 1. If client disconnects early, Starlette will raise "Response content shorter than Content-Length"
+            # 2. StreamingResponse uses chunked transfer encoding, which doesn't require Content-Length
+            # 3. HLS clients can work with chunked encoding just fine
+            # 
+            # We still include X-Fetched-Size header for debugging purposes
+            # Only set Content-Length for byte-range requests (206 Partial Content) where we know the exact length
+            if "Range" in request.headers and "Content-Length" in cf_response.headers:
+                # For byte-range requests, Content-Length is the length of the partial content
                 response_headers["Content-Length"] = cf_response.headers["Content-Length"]
-                logger.info(f"[PROXY] Content-Length: {cf_response.headers['Content-Length']}, path={path}")
+                logger.info(f"[PROXY] Content-Length (byte-range): {cf_response.headers['Content-Length']}, path={path}")
+            else:
+                # For full streaming responses, don't set Content-Length - use chunked transfer encoding
+                # This prevents errors when client disconnects before receiving all content
+                logger.info(f"[PROXY] Using chunked transfer encoding (no Content-Length) for streaming: path={path}")
             
             # Set status code (206 for partial content if Range was requested)
             status_code = status.HTTP_206_PARTIAL_CONTENT if "Range" in request.headers else status.HTTP_200_OK
