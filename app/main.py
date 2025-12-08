@@ -442,6 +442,7 @@ async def stream_content(
                     headers={
                         "Cache-Control": "no-cache",
                         "Access-Control-Allow-Origin": "*",
+                        "X-Original-URL": cloudfront_url,  # Debug header showing original CloudFront URL
                     },
                 )
 
