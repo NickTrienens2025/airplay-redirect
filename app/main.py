@@ -456,6 +456,13 @@ async def stream_content(
                     },
                 )
 
+            # Get the fetched size from CloudFront response
+            fetched_size = cf_response.headers.get("Content-Length")
+            if fetched_size:
+                fetched_size = int(fetched_size)
+            else:
+                fetched_size = None
+
             # For non-M3U8 files (segments), stream directly
             async def stream_generator() -> AsyncGenerator[bytes, None]:
                 """Stream content in chunks."""
@@ -507,6 +514,10 @@ async def stream_content(
                 "Access-Control-Allow-Origin": "*",
                 "X-Original-URL": cloudfront_url,  # Debug header showing original CloudFront URL
             }
+            
+            # Add fetched size header if available
+            if fetched_size is not None:
+                response_headers["X-Fetched-Size"] = str(fetched_size)
             
             # Forward Content-Range header for byte-range responses
             if "Content-Range" in cf_response.headers:
