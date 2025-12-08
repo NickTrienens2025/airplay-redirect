@@ -107,6 +107,29 @@ app = FastAPI(
 )
 
 
+@app.exception_handler(ExceptionGroup)
+async def exception_group_handler(request: Request, exc: ExceptionGroup) -> Response:
+    """
+    Handle ExceptionGroup exceptions that occur during streaming responses.
+    
+    These can happen when clients disconnect during streaming, causing
+    StreamClosed exceptions to be wrapped in ExceptionGroup by Starlette's
+    TaskGroup handling.
+    """
+    # Check if any exception in the group is a StreamClosed exception
+    if any(isinstance(e, httpx.StreamClosed) for e in exc.exceptions):
+        logger.debug(f"Stream closed by client (ExceptionGroup handler): {request.url.path}")
+        return Response(
+            content="",
+            status_code=status.HTTP_200_OK,
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+    
+    # If it's not a StreamClosed exception, log and re-raise
+    logger.error(f"Unhandled ExceptionGroup: {exc}")
+    raise exc
+
+
 def _validate_path(path: str) -> None:
     """
     Validate path to prevent directory traversal attacks.
