@@ -59,7 +59,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Create demo session if enabled
     if settings.demo_stream_enabled:
         try:
-            # Create demo session with empty cookies (public test stream)
+            # Create demo session with fixed IDs that persist across deployments
+            # Fixed IDs: s_demo_boops_and_bips and t_demo_boops_and_bips
             demo_cookies = CloudFrontCookies(
                 CloudFront_Policy="demo",
                 CloudFront_Signature="demo",
@@ -70,6 +71,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 base_url=settings.demo_stream_base_url,
                 cookies=demo_cookies,
                 ttl=settings.session_max_ttl_seconds,  # Use max TTL for demo session
+                session_id="s_demo_boops_and_bips",
+                token="t_demo_boops_and_bips",
             )
             
             demo_session = SessionResponse(
@@ -80,7 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             
             logger.info(
                 f"Demo session created: session_id={demo_session.session_id}, "
-                f"token={demo_session.token[:8]}..., stream_url={settings.demo_stream_url}"
+                f"token={demo_session.token}, stream_url={settings.demo_stream_url}"
             )
         except Exception as e:
             logger.warning(f"Failed to create demo session: {e}")
@@ -435,7 +438,7 @@ async def root(request: Request) -> HTMLResponse:
         
         demo_info = {
             "enabled": True,
-            "name": "Big Buck Bunny (Test Stream)",
+            "name": "boops and bips",
             "stream_url": stream_url,
             "session_id": demo_session.session_id,
             "token": demo_session.token,

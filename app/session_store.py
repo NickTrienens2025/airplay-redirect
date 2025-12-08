@@ -41,6 +41,8 @@ class SessionStore:
         base_url: str,
         cookies: CloudFrontCookies,
         ttl: Optional[int] = None,
+        session_id: Optional[str] = None,
+        token: Optional[str] = None,
     ) -> SessionData:
         """
         Create a new session with CloudFront cookies.
@@ -49,6 +51,8 @@ class SessionStore:
             base_url: CloudFront base URL (e.g., "https://cdn.example.com/content/2025")
             cookies: CloudFront signed cookies
             ttl: Optional session TTL in seconds (defaults to config value)
+            session_id: Optional fixed session ID (for demo sessions)
+            token: Optional fixed token (for demo sessions)
 
         Returns:
             SessionData with generated session_id and token
@@ -66,9 +70,11 @@ class SessionStore:
             # Enforce maximum TTL
             ttl = min(ttl, settings.session_max_ttl_seconds)
 
-        # Generate IDs
-        session_id = self._generate_id("s")
-        token = self._generate_id("t")
+        # Generate IDs if not provided
+        if session_id is None:
+            session_id = self._generate_id("s")
+        if token is None:
+            token = self._generate_id("t")
 
         # Create session data
         now = datetime.now(timezone.utc)
