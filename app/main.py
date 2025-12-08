@@ -213,11 +213,16 @@ async def runtime_error_handler(request: Request, exc: RuntimeError):
     if request.url.path.startswith("/ws/"):
         raise exc
     
-    if "response already started" in str(exc).lower():
-        logger.debug(f"Response already started, suppressing RuntimeError: {request.url.path}")
+    error_msg_lower = str(exc).lower()
+    if "response already started" in error_msg_lower or "response content shorter than content-length" in error_msg_lower:
+        logger.debug(
+            f"RuntimeError: Response error (already started or Content-Length mismatch), "
+            f"suppressing: {request.url.path}"
+        )
         # Suppress the exception - can't return new response when streaming has started
+        # Content-Length mismatch happens when client disconnects early, which is normal for HLS
         return
-    # Re-raise if it's not about response already started
+    # Re-raise if it's not about response already started or Content-Length mismatch
     raise exc
 
 
