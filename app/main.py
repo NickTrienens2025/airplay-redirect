@@ -303,6 +303,11 @@ async def stream_content(
         if cookie_header:
             headers["Cookie"] = cookie_header
         
+        # Forward Range header for byte-range requests (required for #EXT-X-BYTERANGE)
+        if "Range" in request.headers:
+            headers["Range"] = request.headers["Range"]
+            logger.debug(f"Forwarding Range header: {request.headers['Range']}")
+        
         async with http_client.stream(
             "GET",
             cloudfront_url,
@@ -367,15 +372,30 @@ async def stream_content(
                     logger.debug(f"Exception during streaming (likely client disconnect): {type(e).__name__}: {path}")
                     return
 
+            # Build response headers
+            response_headers = {
+                "Accept-Ranges": cf_response.headers.get("Accept-Ranges", "bytes"),
+                "Cache-Control": cf_response.headers.get("Cache-Control", ""),
+                "Access-Control-Allow-Origin": "*",
+            }
+            
+            # Forward Content-Range header for byte-range responses
+            if "Content-Range" in cf_response.headers:
+                response_headers["Content-Range"] = cf_response.headers["Content-Range"]
+                logger.debug(f"Forwarding Content-Range: {cf_response.headers['Content-Range']}")
+            
+            # Forward Content-Length (important for byte-range responses)
+            if "Content-Length" in cf_response.headers:
+                response_headers["Content-Length"] = cf_response.headers["Content-Length"]
+            
+            # Set status code (206 for partial content if Range was requested)
+            status_code = status.HTTP_206_PARTIAL_CONTENT if "Range" in request.headers else status.HTTP_200_OK
+            
             return StreamingResponse(
                 stream_generator(),
                 media_type=content_type,
-                headers={
-                    "Content-Length": cf_response.headers.get("Content-Length", ""),
-                    "Accept-Ranges": cf_response.headers.get("Accept-Ranges", "bytes"),
-                    "Cache-Control": cf_response.headers.get("Cache-Control", ""),
-                    "Access-Control-Allow-Origin": "*",
-                },
+                status_code=status_code,
+                headers=response_headers,
             )
 
     except httpx.StreamClosed:

@@ -63,6 +63,10 @@ class M3U8Rewriter:
         if line.startswith("#EXT-X-KEY:") and "URI=" in line:
             return self._rewrite_key_line(line, base_url)
 
+        # Handle #EXT-X-BYTERANGE tags (preserve as-is, they reference the next URL line)
+        if line.startswith("#EXT-X-BYTERANGE:"):
+            return line
+
         # Handle comment lines (keep as-is)
         if line.startswith("#") or not line.strip():
             return line
