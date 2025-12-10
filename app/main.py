@@ -16,6 +16,7 @@ from app.config import settings
 from app.exceptions import (
     CloudFrontError,
     InvalidTokenError,
+    M3U8ValidationError,
     PathTraversalError,
 )
 from app.m3u8_rewriter import M3U8Rewriter
@@ -25,6 +26,7 @@ from app.models import (
     RefreshSessionRequest,
     RefreshSessionResponse,
     SessionResponse,
+    ValidationResult,
 )
 from app.session_store import session_store, traffic_metrics
 
@@ -272,6 +274,88 @@ def _get_content_type(path: str) -> str:
         return "application/octet-stream"
 
 
+async def _validate_m3u8(base_url: str, path: str, cookies: dict[str, str]) -> ValidationResult:
+    """
+    Validate M3U8 file is accessible with provided cookies.
+
+    Args:
+        base_url: CloudFront base URL
+        path: Path to the M3U8 file
+        cookies: CloudFront cookies
+
+    Returns:
+        ValidationResult with success/failure details
+    """
+    # Normalize path
+    clean_path = path.lstrip("/")
+    url = f"{base_url.rstrip('/')}/{clean_path}"
+
+    logger.info(f"[Validation] Testing M3U8 access: {url}")
+
+    # Build cookie header
+    cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            headers = {"User-Agent": "HLS-Proxy/1.0"}
+            if cookie_header:
+                headers["Cookie"] = cookie_header
+
+            response = await client.get(url, headers=headers)
+
+            if response.status_code == 200:
+                # Verify it looks like M3U8 content
+                content = response.text
+                if "#EXTM3U" in content:
+                    logger.info(f"[Validation] Success: {url} returned valid M3U8")
+                    return ValidationResult(
+                        validated=True,
+                        success=True,
+                        status_code=200,
+                    )
+                else:
+                    logger.warning(f"[Validation] Response is not M3U8 format: {url}")
+                    return ValidationResult(
+                        validated=True,
+                        success=False,
+                        status_code=200,
+                        error="Response does not contain valid M3U8 content",
+                    )
+            else:
+                # Get CloudFront error details if available
+                cf_error = response.headers.get("x-amz-cf-pop", "")
+                error_msg = f"HTTP {response.status_code}"
+                if cf_error:
+                    error_msg += f" (CloudFront POP: {cf_error})"
+                if response.status_code == 403:
+                    error_msg += " - Access denied by CloudFront"
+
+                logger.error(f"[Validation] Failed: {url} returned {response.status_code}")
+                return ValidationResult(
+                    validated=True,
+                    success=False,
+                    status_code=response.status_code,
+                    error=error_msg,
+                )
+
+    except httpx.TimeoutException:
+        logger.error(f"[Validation] Timeout fetching: {url}")
+        return ValidationResult(
+            validated=True,
+            success=False,
+            status_code=None,
+            error="Request timed out",
+        )
+    except httpx.RequestError as e:
+        logger.error(f"[Validation] Request error: {e}")
+        return ValidationResult(
+            validated=True,
+            success=False,
+            status_code=None,
+            error=f"Request failed: {str(e)}",
+        )
+
+
 @app.post(
     "/api/v1/session/create",
     response_model=SessionResponse,
@@ -284,8 +368,24 @@ async def create_session(request: CreateSessionRequest) -> SessionResponse:
     Create a new streaming session.
 
     A single session can be used for multiple feeds from the same base URL.
+    If validate_path is provided, will fetch the M3U8 file to verify cookies work.
     """
     logger.info(f"Creating session for base_url: {request.base_url}")
+
+    validation_result: ValidationResult | None = None
+
+    # Validate M3U8 if path provided
+    if request.validate_path:
+        validation_result = await _validate_m3u8(
+            base_url=str(request.base_url),
+            path=request.validate_path,
+            cookies=request.cookies.to_cookie_dict(),
+        )
+        if not validation_result.success:
+            raise M3U8ValidationError(
+                status_code=validation_result.status_code or 0,
+                message=validation_result.error or "Unknown validation error",
+            )
 
     session_data = session_store.create_session(
         base_url=str(request.base_url),
@@ -302,6 +402,7 @@ async def create_session(request: CreateSessionRequest) -> SessionResponse:
         session_id=session_data.session_id,
         token=session_data.token,
         expires_at=session_data.expires_at,
+        validation=validation_result,
     )
 
 

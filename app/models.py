@@ -43,6 +43,10 @@ class CreateSessionRequest(BaseModel):
         le=21600,
         description="Session TTL in seconds (60s to 6 hours)",
     )
+    validate_path: Optional[str] = Field(
+        None,
+        description="Optional M3U8 path to validate cookies work (e.g., 'index.m3u8')",
+    )
 
     @field_validator("base_url")
     @classmethod
@@ -59,12 +63,22 @@ class RefreshSessionRequest(BaseModel):
     cookies: CloudFrontCookies = Field(..., description="Updated CloudFront signed cookies")
 
 
+class ValidationResult(BaseModel):
+    """Result of M3U8 validation during session creation."""
+
+    validated: bool = Field(..., description="Whether validation was performed")
+    success: bool = Field(..., description="Whether validation succeeded")
+    status_code: Optional[int] = Field(None, description="HTTP status code from CloudFront")
+    error: Optional[str] = Field(None, description="Error message if validation failed")
+
+
 class SessionResponse(BaseModel):
     """Response for session creation."""
 
     session_id: str = Field(..., description="Session ID for management operations")
     token: str = Field(..., description="Authentication token for streaming requests")
     expires_at: datetime = Field(..., description="Session expiration timestamp")
+    validation: Optional[ValidationResult] = Field(None, description="M3U8 validation result")
 
 
 class RefreshSessionResponse(BaseModel):

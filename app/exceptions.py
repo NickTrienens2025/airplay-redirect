@@ -71,3 +71,17 @@ class CloudFrontError(HTTPException):
             status_code=status_code if status_code != 403 else status.HTTP_403_FORBIDDEN,
             detail=detail,
         )
+
+
+class M3U8ValidationError(HTTPException):
+    """Raised when M3U8 validation fails during session creation."""
+
+    def __init__(self, status_code: int, message: str):
+        detail = f"M3U8 validation failed: {message}"
+        if status_code == 403:
+            detail += " (CloudFront cookies may be expired, invalid, or IP-restricted)"
+        super().__init__(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail,
+        )
+        self.cloudfront_status = status_code
