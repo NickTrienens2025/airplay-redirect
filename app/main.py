@@ -120,11 +120,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             # Create demo session with fixed IDs that persist across deployments
             # Fixed IDs: s_demo_boops_and_bips and t_demo_boops_and_bips
-            demo_cookies = CloudFrontCookies(
-                CloudFront_Policy="demo",
-                CloudFront_Signature="demo",
-                CloudFront_Key_Pair_Id="demo",
-            )
+            # Use create_demo() to bypass cookie format validation
+            demo_cookies = CloudFrontCookies.create_demo()
             
             demo_session_data = session_store.create_session(
                 base_url=settings.demo_stream_base_url,

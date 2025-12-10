@@ -1,11 +1,42 @@
 """Tests for session store."""
 
+import base64
+import json
 import pytest
 from datetime import datetime, timedelta
 
 from app.exceptions import SessionExpiredError, SessionNotFoundError
 from app.models import CloudFrontCookies
 from app.session_store import SessionStore
+
+
+def _encode_cloudfront_base64(data: bytes) -> str:
+    """Encode data using CloudFront's URL-safe base64."""
+    encoded = base64.b64encode(data).decode("utf-8")
+    # CloudFront uses: - instead of +, _ instead of =, ~ instead of /
+    return encoded.replace("+", "-").replace("=", "_").replace("/", "~")
+
+
+def _make_valid_policy() -> str:
+    """Create a valid CloudFront policy for testing."""
+    policy = {
+        "Statement": [
+            {
+                "Resource": "https://example.cloudfront.net/*",
+                "Condition": {
+                    "DateLessThan": {"AWS:EpochTime": 9999999999}
+                }
+            }
+        ]
+    }
+    return _encode_cloudfront_base64(json.dumps(policy).encode("utf-8"))
+
+
+def _make_valid_signature() -> str:
+    """Create a valid-looking CloudFront signature for testing (128 bytes when decoded)."""
+    # Generate 128 bytes of fake signature data
+    fake_sig = b"x" * 128
+    return _encode_cloudfront_base64(fake_sig)
 
 
 @pytest.fixture
@@ -16,12 +47,12 @@ def store():
 
 @pytest.fixture
 def sample_cookies():
-    """Sample CloudFront cookies."""
+    """Sample CloudFront cookies with valid format."""
     return CloudFrontCookies(
         **{
-            "CloudFront-Policy": "sample_policy_value",
-            "CloudFront-Signature": "sample_signature_value",
-            "CloudFront-Key-Pair-Id": "APKAXXXXX",
+            "CloudFront-Policy": _make_valid_policy(),
+            "CloudFront-Signature": _make_valid_signature(),
+            "CloudFront-Key-Pair-Id": "K2ABCDEFGHIJ",
         }
     )
 
@@ -86,11 +117,25 @@ class TestSessionStore:
             cookies=sample_cookies,
         )
 
+        # Create new valid cookies
+        new_policy = {
+            "Statement": [
+                {
+                    "Resource": "https://new.cloudfront.net/*",
+                    "Condition": {
+                        "DateLessThan": {"AWS:EpochTime": 8888888888}
+                    }
+                }
+            ]
+        }
+        new_policy_encoded = _encode_cloudfront_base64(json.dumps(new_policy).encode("utf-8"))
+        new_signature = _encode_cloudfront_base64(b"y" * 128)
+        
         new_cookies = CloudFrontCookies(
             **{
-                "CloudFront-Policy": "new_policy_value",
-                "CloudFront-Signature": "new_signature_value",
-                "CloudFront-Key-Pair-Id": "APKAXXXXX",
+                "CloudFront-Policy": new_policy_encoded,
+                "CloudFront-Signature": new_signature,
+                "CloudFront-Key-Pair-Id": "K3NEWKEYXXXX",
             }
         )
 
@@ -99,8 +144,8 @@ class TestSessionStore:
             new_cookies=new_cookies,
         )
 
-        assert refreshed.cookies["CloudFront-Policy"] == "new_policy_value"
-        assert refreshed.cookies["CloudFront-Signature"] == "new_signature_value"
+        assert refreshed.cookies["CloudFront-Policy"] == new_policy_encoded
+        assert refreshed.cookies["CloudFront-Signature"] == new_signature
         assert refreshed.token == session.token  # Token should not change
 
     def test_delete_session(self, store, sample_cookies):
