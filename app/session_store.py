@@ -152,6 +152,7 @@ class SessionStore:
         ttl: Optional[int] = None,
         session_id: Optional[str] = None,
         token: Optional[str] = None,
+        manifest_path: Optional[str] = None,
     ) -> SessionData:
         """
         Create a new session with CloudFront cookies.
@@ -162,6 +163,7 @@ class SessionStore:
             ttl: Optional session TTL in seconds (defaults to config value)
             session_id: Optional fixed session ID (for demo sessions)
             token: Optional fixed token (for demo sessions)
+            manifest_path: Optional relative path to manifest from base_url
 
         Returns:
             SessionData with generated session_id and token
@@ -191,6 +193,7 @@ class SessionStore:
             session_id=session_id,
             token=token,
             base_url=str(base_url),
+            manifest_path=manifest_path,
             cookies=cookies.to_cookie_dict(),
             created_at=now,
             expires_at=now + timedelta(seconds=ttl),
@@ -360,6 +363,7 @@ class SessionStore:
                         "token": session.token,  # Full token for constructing valid URLs
                         "token_short": session.token[:8] + "..." if len(session.token) > 8 else session.token,
                         "base_url": session.base_url,
+                        "manifest_path": session.manifest_path,  # Relative path to manifest
                         "created_at": session.created_at.isoformat(),
                         "expires_at": session.expires_at.isoformat(),
                         "last_accessed": session.last_accessed.isoformat(),

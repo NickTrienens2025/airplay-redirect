@@ -223,6 +223,7 @@ class SessionData(BaseModel):
     session_id: str
     token: str
     base_url: str  # CloudFront base URL (e.g., "https://cdn.example.com/content/2025")
+    manifest_path: Optional[str] = None  # Relative path to manifest (e.g., "stream.m3u8")
     cookies: dict[str, str]  # CloudFront cookies as dict
     created_at: datetime
     expires_at: datetime

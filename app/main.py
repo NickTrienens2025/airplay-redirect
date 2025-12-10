@@ -348,6 +348,30 @@ async def _validate_m3u8(manifest_url: str, cookies: dict[str, str]) -> Validati
         )
 
 
+def _compute_manifest_path(manifest_url: str, base_url: str) -> str:
+    """
+    Compute the relative path from base_url to manifest_url.
+    
+    Example:
+        manifest_url: https://cdn.example.com/content/2025/stream.m3u8
+        base_url: https://cdn.example.com/content/2025
+        result: stream.m3u8
+    """
+    # Normalize URLs
+    manifest_url = manifest_url.rstrip("/")
+    base_url = base_url.rstrip("/")
+    
+    # If manifest_url starts with base_url, extract the relative path
+    if manifest_url.startswith(base_url):
+        path = manifest_url[len(base_url):].lstrip("/")
+        return path
+    
+    # Fallback: extract just the filename
+    from urllib.parse import urlparse
+    parsed = urlparse(manifest_url)
+    return parsed.path.split("/")[-1]
+
+
 @app.post(
     "/api/v1/session/create",
     response_model=SessionResponse,
@@ -378,15 +402,20 @@ async def create_session(request: CreateSessionRequest) -> SessionResponse:
             message=validation_result.error or "Unknown validation error",
         )
 
+    # Compute the relative manifest path from base_url
+    manifest_path = _compute_manifest_path(request.manifest_url, str(request.base_url))
+    logger.info(f"Computed manifest_path: {manifest_path}")
+
     session_data = session_store.create_session(
         base_url=str(request.base_url),
         cookies=request.cookies,
         ttl=request.ttl,
+        manifest_path=manifest_path,
     )
 
     logger.info(
         f"Session created: session_id={session_data.session_id}, "
-        f"expires_at={session_data.expires_at.isoformat()}"
+        f"manifest_path={manifest_path}, expires_at={session_data.expires_at.isoformat()}"
     )
 
     return SessionResponse(

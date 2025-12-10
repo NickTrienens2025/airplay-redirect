@@ -735,9 +735,9 @@
                 const fullToken = session.token || '';
                 const tokenShort = session.token_short || fullToken.substring(0, 8) + '...';
                 
-                // Construct stream URL - user needs to provide actual manifest path
-                let streamPath = isDemo ? 'x36xhzz.m3u8' : 'YOUR_MANIFEST.m3u8';
-                const streamUrl = `${baseUrl}/stream/${streamPath}?token=${fullToken}`;
+                // Construct stream URL using the manifest_path stored in session
+                let streamPath = session.manifest_path || (isDemo ? 'x36xhzz.m3u8' : null);
+                const streamUrl = streamPath ? `${baseUrl}/stream/${streamPath}?token=${fullToken}` : null;
                 
                 return `
                     <div class="session-item ${isSelected ? 'selected' : ''}" onclick="selectSession('${escapeHtml(id)}', '${escapeHtml(fullToken)}')">
@@ -747,16 +747,23 @@
                         </div>
                         <div class="session-details">
                             <p><span class="label">Base URL:</span> <span style="word-break: break-all;">${escapeHtml(session.base_url || 'N/A')}</span></p>
+                            ${streamPath ? `<p><span class="label">Manifest:</span> <span style="word-break: break-all;">${escapeHtml(streamPath)}</span></p>` : ''}
                             <p><span class="label">Token:</span> <code style="word-break: break-all;">${escapeHtml(fullToken)}</code></p>
+                            ${streamUrl ? `<p><span class="label">Stream URL:</span> <code style="word-break: break-all; font-size: 0.75em;">${escapeHtml(streamUrl)}</code></p>` : ''}
                             <p><span class="label">Created:</span> ${session.created_at ? new Date(session.created_at).toLocaleString() : 'N/A'}</p>
                             <p><span class="label">Expires:</span> ${session.expires_at ? new Date(session.expires_at).toLocaleString() : 'N/A'}</p>
                         </div>
                         <div class="session-actions">
+                            ${streamUrl ? `
+                            <a href="${streamUrl}" target="_blank" class="session-link" title="Open stream in new tab">
+                                ▶️ Open Stream
+                            </a>
+                            <span class="session-link copy" onclick="event.stopPropagation(); copyToClipboard('${escapeHtml(streamUrl)}')" title="Copy stream URL">
+                                📋 Copy Stream URL
+                            </span>
+                            ` : ''}
                             <span class="session-link copy" onclick="event.stopPropagation(); copyToClipboard('${escapeHtml(fullToken)}')" title="Copy token">
                                 🔑 Copy Token
-                            </span>
-                            <span class="session-link copy" onclick="event.stopPropagation(); copyToClipboard('${escapeHtml(session.base_url)}')" title="Copy base URL">
-                                📋 Copy Base URL
                             </span>
                             ${isDemo ? `
                             <a href="${baseUrl}/" class="session-link" title="Go to player page">
