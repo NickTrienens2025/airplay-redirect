@@ -479,7 +479,7 @@
             <!-- Live Traffic Feed -->
             <div class="card full-width">
                 <div class="card-header">
-                    <h2>Live Traffic Feed</h2>
+                    <h2>Live Traffic Feed <span id="filter-indicator" style="font-size:0.8em;color:#1da1f2;"></span></h2>
                     <a href="/" class="nav-link">← Back to Player</a>
                 </div>
                 <div class="card-body traffic-feed" id="traffic-feed">
@@ -637,9 +637,65 @@
             }).join('');
         }
         
-        function selectSession(sessionId) {
-            selectedSessionId = sessionId;
+        let selectedSessionToken = null;
+        
+        function selectSession(sessionId, token) {
+            if (selectedSessionId === sessionId) {
+                // Deselect if clicking same session
+                selectedSessionId = null;
+                selectedSessionToken = null;
+            } else {
+                selectedSessionId = sessionId;
+                selectedSessionToken = token;
+            }
+            
+            // Update filter indicator
+            const indicator = document.getElementById('filter-indicator');
+            if (selectedSessionId) {
+                indicator.textContent = `(filtering: ${selectedSessionId.substring(0, 16)}...)`;
+            } else {
+                indicator.textContent = '';
+            }
+            
             updateSessionsList(metrics.sessions);
+            refreshTrafficFeed();
+        }
+        
+        function refreshTrafficFeed() {
+            // Re-render traffic feed with current filter
+            const feed = document.getElementById('traffic-feed');
+            const filtered = selectedSessionToken 
+                ? trafficHistory.filter(t => t.token === selectedSessionToken)
+                : trafficHistory;
+            
+            if (filtered.length === 0) {
+                feed.innerHTML = `
+                    <div class="empty-state">
+                        <div class="icon">📡</div>
+                        <p>${selectedSessionId ? 'No traffic for selected session' : 'Waiting for traffic...'}</p>
+                        ${selectedSessionId ? '<p style="margin-top:8px;font-size:0.8em;">Click session again to show all traffic</p>' : ''}
+                    </div>
+                `;
+                return;
+            }
+            
+            feed.innerHTML = filtered.map(entry => {
+                const isError = entry.status && entry.status >= 400;
+                const statusClass = entry.status ? `s${Math.floor(entry.status / 100)}xx` : '';
+                const time = entry.timestamp ? new Date(entry.timestamp) : new Date();
+                const tokenDisplay = entry.token_short || (entry.token ? entry.token.substring(0, 8) + '...' : '');
+                
+                return `
+                    <div class="traffic-item${isError ? ' error' : ''}">
+                        <span class="traffic-time">${formatTime(time)}</span>
+                        <span class="traffic-method ${entry.method || 'GET'}">${entry.method || 'GET'}</span>
+                        <span class="traffic-path" title="${escapeHtml(entry.path || '')}">${escapeHtml(entry.path || 'N/A')}</span>
+                        ${entry.status ? `<span class="traffic-status ${statusClass}">${entry.status}</span>` : ''}
+                        <span class="traffic-size">${entry.bytes ? formatBytes(entry.bytes) : '-'}</span>
+                        <span class="traffic-token">${escapeHtml(tokenDisplay)}</span>
+                    </div>
+                `;
+            }).join('');
         }
         
         function updateSessionsList(sessions) {
@@ -675,32 +731,32 @@
                     statusText = `${minutesLeft}m left`;
                 }
                 
-                // Get the full token (we only have truncated version, so construct URL pattern)
-                const token = session.token || '';
-                const fullToken = isDemo ? 't_demo_boops_and_bips' : token;
+                // Use full token from session data
+                const fullToken = session.token || '';
+                const tokenShort = session.token_short || fullToken.substring(0, 8) + '...';
                 
-                // Construct stream URL
-                let streamPath = isDemo ? 'x36xhzz.m3u8' : 'manifest.m3u8';
+                // Construct stream URL - user needs to provide actual manifest path
+                let streamPath = isDemo ? 'x36xhzz.m3u8' : 'YOUR_MANIFEST.m3u8';
                 const streamUrl = `${baseUrl}/stream/${streamPath}?token=${fullToken}`;
                 
                 return `
-                    <div class="session-item ${isSelected ? 'selected' : ''}" onclick="selectSession('${escapeHtml(id)}')">
+                    <div class="session-item ${isSelected ? 'selected' : ''}" onclick="selectSession('${escapeHtml(id)}', '${escapeHtml(fullToken)}')">
                         <div class="session-header">
-                            <span class="session-id">${escapeHtml(id.substring(0, 24))}...</span>
+                            <span class="session-id">${escapeHtml(id)}</span>
                             <span class="session-status ${statusClass}">${statusText}</span>
                         </div>
                         <div class="session-details">
-                            <p><span class="label">Base URL:</span> ${escapeHtml(session.base_url || 'N/A')}</p>
-                            <p><span class="label">Token:</span> <code>${escapeHtml(fullToken.substring(0, 12))}...</code></p>
+                            <p><span class="label">Base URL:</span> <span style="word-break: break-all;">${escapeHtml(session.base_url || 'N/A')}</span></p>
+                            <p><span class="label">Token:</span> <code style="word-break: break-all;">${escapeHtml(fullToken)}</code></p>
                             <p><span class="label">Created:</span> ${session.created_at ? new Date(session.created_at).toLocaleString() : 'N/A'}</p>
                             <p><span class="label">Expires:</span> ${session.expires_at ? new Date(session.expires_at).toLocaleString() : 'N/A'}</p>
                         </div>
                         <div class="session-actions">
-                            <a href="${streamUrl}" target="_blank" class="session-link" title="Open stream in new tab">
-                                ▶️ Open Stream
-                            </a>
-                            <span class="session-link copy" onclick="event.stopPropagation(); copyToClipboard('${streamUrl}')" title="Copy stream URL">
-                                📋 Copy URL
+                            <span class="session-link copy" onclick="event.stopPropagation(); copyToClipboard('${escapeHtml(fullToken)}')" title="Copy token">
+                                🔑 Copy Token
+                            </span>
+                            <span class="session-link copy" onclick="event.stopPropagation(); copyToClipboard('${escapeHtml(session.base_url)}')" title="Copy base URL">
+                                📋 Copy Base URL
                             </span>
                             ${isDemo ? `
                             <a href="${baseUrl}/" class="session-link" title="Go to player page">
@@ -714,13 +770,6 @@
         }
         
         function addTrafficEntry(entry) {
-            const feed = document.getElementById('traffic-feed');
-            
-            // Remove empty state if present
-            if (feed.querySelector('.empty-state')) {
-                feed.innerHTML = '';
-            }
-            
             // Add to history
             trafficHistory.unshift(entry);
             while (trafficHistory.length > maxTrafficEntries) {
@@ -745,6 +794,19 @@
                 metrics.totalBytes += entry.bytes;
             }
             
+            // If filtering by session, only show if matches
+            if (selectedSessionToken && entry.token !== selectedSessionToken) {
+                updateUI();
+                return;
+            }
+            
+            const feed = document.getElementById('traffic-feed');
+            
+            // Remove empty state if present
+            if (feed.querySelector('.empty-state')) {
+                feed.innerHTML = '';
+            }
+            
             // Create traffic entry element
             const div = document.createElement('div');
             const isError = entry.status && entry.status >= 400;
@@ -752,6 +814,7 @@
             
             const statusClass = entry.status ? `s${Math.floor(entry.status / 100)}xx` : '';
             const time = entry.timestamp ? new Date(entry.timestamp) : new Date();
+            const tokenDisplay = entry.token_short || (entry.token ? entry.token.substring(0, 8) + '...' : '');
             
             div.innerHTML = `
                 <span class="traffic-time">${formatTime(time)}</span>
@@ -759,7 +822,7 @@
                 <span class="traffic-path" title="${escapeHtml(entry.path || '')}">${escapeHtml(entry.path || 'N/A')}</span>
                 ${entry.status ? `<span class="traffic-status ${statusClass}">${entry.status}</span>` : ''}
                 <span class="traffic-size">${entry.bytes ? formatBytes(entry.bytes) : '-'}</span>
-                ${entry.token ? `<span class="traffic-token">${escapeHtml(entry.token)}</span>` : ''}
+                <span class="traffic-token">${escapeHtml(tokenDisplay)}</span>
             `;
             
             feed.insertBefore(div, feed.firstChild);

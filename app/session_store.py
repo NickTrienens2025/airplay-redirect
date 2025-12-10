@@ -53,7 +53,8 @@ class TrafficMetrics:
                 "method": method,
                 "status": status,
                 "bytes": bytes_sent,
-                "token": token[:8] + "..." if token and len(token) > 8 else token,
+                "token": token,  # Full token for filtering
+                "token_short": token[:8] + "..." if token and len(token) > 8 else token,  # Display version
             }
             self.recent_traffic.append(entry)
             
@@ -356,7 +357,8 @@ class SessionStore:
                 if not session.is_expired(now):
                     sessions[session_id] = {
                         "session_id": session.session_id,
-                        "token": session.token[:8] + "..." if len(session.token) > 8 else session.token,
+                        "token": session.token,  # Full token for constructing valid URLs
+                        "token_short": session.token[:8] + "..." if len(session.token) > 8 else session.token,
                         "base_url": session.base_url,
                         "created_at": session.created_at.isoformat(),
                         "expires_at": session.expires_at.isoformat(),
