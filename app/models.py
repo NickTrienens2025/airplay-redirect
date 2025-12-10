@@ -155,15 +155,15 @@ class CreateSessionRequest(BaseModel):
 
     base_url: HttpUrl = Field(..., description="CloudFront base URL for the stream")
     cookies: CloudFrontCookies = Field(..., description="CloudFront signed cookies")
+    manifest_url: str = Field(
+        ...,
+        description="Full URL to the M3U8 manifest to validate cookies work before creating session",
+    )
     ttl: Optional[int] = Field(
         None,
         ge=60,
         le=21600,
         description="Session TTL in seconds (60s to 6 hours)",
-    )
-    validate_path: Optional[str] = Field(
-        None,
-        description="Optional M3U8 path to validate cookies work (e.g., 'index.m3u8')",
     )
 
     @field_validator("base_url")
@@ -172,6 +172,16 @@ class CreateSessionRequest(BaseModel):
         """Ensure base_url uses HTTPS."""
         if v.scheme != "https":
             raise ValueError("base_url must use HTTPS protocol")
+        return v
+
+    @field_validator("manifest_url")
+    @classmethod
+    def validate_manifest_url(cls, v: str) -> str:
+        """Ensure manifest_url is a valid HTTPS URL ending in .m3u8."""
+        if not v.startswith("https://"):
+            raise ValueError("manifest_url must use HTTPS protocol")
+        if not v.lower().endswith(".m3u8"):
+            raise ValueError("manifest_url must point to an M3U8 file")
         return v
 
 

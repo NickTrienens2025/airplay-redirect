@@ -3,9 +3,11 @@
 import base64
 import json
 import pytest
+from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.models import ValidationResult
 
 client = TestClient(app)
 
@@ -48,15 +50,24 @@ def _valid_cookies() -> dict:
     }
 
 
+def _mock_successful_validation():
+    """Return a mock for successful M3U8 validation."""
+    return ValidationResult(validated=True, success=True, status_code=200)
+
+
 class TestSessionEndpoints:
     """Test suite for session management endpoints."""
 
-    def test_create_session(self):
-        """Test creating a new session."""
+    @patch("app.main._validate_m3u8")
+    def test_create_session(self, mock_validate):
+        """Test creating a new session with valid manifest."""
+        mock_validate.return_value = _mock_successful_validation()
+        
         response = client.post(
             "/api/v1/session/create",
             json={
                 "base_url": "https://cdn.example.com/content/2025",
+                "manifest_url": "https://cdn.example.com/content/2025/index.m3u8",
                 "cookies": _valid_cookies(),
                 "ttl": 3600,
             },
@@ -70,6 +81,49 @@ class TestSessionEndpoints:
         assert "expires_at" in data
         assert data["session_id"].startswith("s_")
         assert data["token"].startswith("t_")
+        assert data["validation"]["success"] is True
+
+    def test_create_session_missing_manifest_url(self):
+        """Test that missing manifest_url returns 422."""
+        response = client.post(
+            "/api/v1/session/create",
+            json={
+                "base_url": "https://cdn.example.com/content/2025",
+                "cookies": _valid_cookies(),
+                "ttl": 3600,
+            },
+        )
+
+        assert response.status_code == 422  # manifest_url is required
+        assert "manifest_url" in response.text.lower()
+
+    def test_create_session_invalid_manifest_url_not_https(self):
+        """Test that HTTP manifest_url is rejected."""
+        response = client.post(
+            "/api/v1/session/create",
+            json={
+                "base_url": "https://cdn.example.com/content/2025",
+                "manifest_url": "http://cdn.example.com/stream.m3u8",  # HTTP not HTTPS
+                "cookies": _valid_cookies(),
+            },
+        )
+
+        assert response.status_code == 422
+        assert "https" in response.text.lower()
+
+    def test_create_session_invalid_manifest_url_not_m3u8(self):
+        """Test that non-M3U8 manifest_url is rejected."""
+        response = client.post(
+            "/api/v1/session/create",
+            json={
+                "base_url": "https://cdn.example.com/content/2025",
+                "manifest_url": "https://cdn.example.com/stream.mp4",  # Not M3U8
+                "cookies": _valid_cookies(),
+            },
+        )
+
+        assert response.status_code == 422
+        assert "m3u8" in response.text.lower()
 
     def test_create_session_empty_cookies(self):
         """Test creating session with empty cookie value."""
@@ -77,6 +131,7 @@ class TestSessionEndpoints:
             "/api/v1/session/create",
             json={
                 "base_url": "https://cdn.example.com/content/2025",
+                "manifest_url": "https://cdn.example.com/content/2025/index.m3u8",
                 "cookies": {
                     "CloudFront-Policy": "",  # Empty value
                     "CloudFront-Signature": _make_valid_signature(),
@@ -93,6 +148,7 @@ class TestSessionEndpoints:
             "/api/v1/session/create",
             json={
                 "base_url": "https://cdn.example.com/content/2025",
+                "manifest_url": "https://cdn.example.com/content/2025/index.m3u8",
                 "cookies": {
                     "CloudFront-Policy": "CORRUPTED_POLICY",  # Invalid base64/JSON
                     "CloudFront-Signature": _make_valid_signature(),
@@ -110,6 +166,7 @@ class TestSessionEndpoints:
             "/api/v1/session/create",
             json={
                 "base_url": "https://cdn.example.com/content/2025",
+                "manifest_url": "https://cdn.example.com/content/2025/index.m3u8",
                 "cookies": {
                     "CloudFront-Policy": _make_valid_policy(),
                     "CloudFront-Signature": "CORRUPTED_SIGNATURE",  # Too short when decoded
@@ -127,6 +184,7 @@ class TestSessionEndpoints:
             "/api/v1/session/create",
             json={
                 "base_url": "https://cdn.example.com/content/2025",
+                "manifest_url": "https://cdn.example.com/content/2025/index.m3u8",
                 "cookies": {
                     "CloudFront-Policy": _make_valid_policy(),
                     "CloudFront-Signature": _make_valid_signature(),
@@ -139,24 +197,53 @@ class TestSessionEndpoints:
         assert "Invalid CloudFront-Key-Pair-Id" in response.text
 
     def test_create_session_http_url(self):
-        """Test that HTTP URLs are rejected (HTTPS required)."""
+        """Test that HTTP base URLs are rejected (HTTPS required)."""
         response = client.post(
             "/api/v1/session/create",
             json={
                 "base_url": "http://cdn.example.com/content/2025",  # HTTP not HTTPS
+                "manifest_url": "https://cdn.example.com/content/2025/index.m3u8",
                 "cookies": _valid_cookies(),
             },
         )
 
         assert response.status_code == 422
 
-    def test_delete_session(self):
+    @patch("app.main._validate_m3u8")
+    def test_create_session_manifest_validation_fails(self, mock_validate):
+        """Test that session creation fails when manifest validation fails."""
+        mock_validate.return_value = ValidationResult(
+            validated=True,
+            success=False,
+            status_code=403,
+            error="HTTP 403 - Access denied by CloudFront",
+        )
+        
+        response = client.post(
+            "/api/v1/session/create",
+            json={
+                "base_url": "https://cdn.example.com/content/2025",
+                "manifest_url": "https://cdn.example.com/content/2025/index.m3u8",
+                "cookies": _valid_cookies(),
+                "ttl": 3600,
+            },
+        )
+
+        # Should fail with the M3U8 validation error
+        assert response.status_code == 403
+        assert "Access denied" in response.text
+
+    @patch("app.main._validate_m3u8")
+    def test_delete_session(self, mock_validate):
         """Test deleting a session."""
+        mock_validate.return_value = _mock_successful_validation()
+        
         # Create session
         create_response = client.post(
             "/api/v1/session/create",
             json={
                 "base_url": "https://cdn.example.com/content/2025",
+                "manifest_url": "https://cdn.example.com/content/2025/index.m3u8",
                 "cookies": _valid_cookies(),
             },
         )

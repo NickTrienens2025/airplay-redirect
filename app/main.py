@@ -271,23 +271,18 @@ def _get_content_type(path: str) -> str:
         return "application/octet-stream"
 
 
-async def _validate_m3u8(base_url: str, path: str, cookies: dict[str, str]) -> ValidationResult:
+async def _validate_m3u8(manifest_url: str, cookies: dict[str, str]) -> ValidationResult:
     """
     Validate M3U8 file is accessible with provided cookies.
 
     Args:
-        base_url: CloudFront base URL
-        path: Path to the M3U8 file
+        manifest_url: Full URL to the M3U8 manifest
         cookies: CloudFront cookies
 
     Returns:
         ValidationResult with success/failure details
     """
-    # Normalize path
-    clean_path = path.lstrip("/")
-    url = f"{base_url.rstrip('/')}/{clean_path}"
-
-    logger.info(f"[Validation] Testing M3U8 access: {url}")
+    logger.info(f"[Validation] Testing M3U8 access: {manifest_url}")
 
     # Build cookie header
     cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
@@ -298,20 +293,20 @@ async def _validate_m3u8(base_url: str, path: str, cookies: dict[str, str]) -> V
             if cookie_header:
                 headers["Cookie"] = cookie_header
 
-            response = await client.get(url, headers=headers)
+            response = await client.get(manifest_url, headers=headers)
 
             if response.status_code == 200:
                 # Verify it looks like M3U8 content
                 content = response.text
                 if "#EXTM3U" in content:
-                    logger.info(f"[Validation] Success: {url} returned valid M3U8")
+                    logger.info(f"[Validation] Success: {manifest_url} returned valid M3U8")
                     return ValidationResult(
                         validated=True,
                         success=True,
                         status_code=200,
                     )
                 else:
-                    logger.warning(f"[Validation] Response is not M3U8 format: {url}")
+                    logger.warning(f"[Validation] Response is not M3U8 format: {manifest_url}")
                     return ValidationResult(
                         validated=True,
                         success=False,
@@ -327,7 +322,7 @@ async def _validate_m3u8(base_url: str, path: str, cookies: dict[str, str]) -> V
                 if response.status_code == 403:
                     error_msg += " - Access denied by CloudFront"
 
-                logger.error(f"[Validation] Failed: {url} returned {response.status_code}")
+                logger.error(f"[Validation] Failed: {manifest_url} returned {response.status_code}")
                 return ValidationResult(
                     validated=True,
                     success=False,
@@ -336,7 +331,7 @@ async def _validate_m3u8(base_url: str, path: str, cookies: dict[str, str]) -> V
                 )
 
     except httpx.TimeoutException:
-        logger.error(f"[Validation] Timeout fetching: {url}")
+        logger.error(f"[Validation] Timeout fetching: {manifest_url}")
         return ValidationResult(
             validated=True,
             success=False,
@@ -358,31 +353,30 @@ async def _validate_m3u8(base_url: str, path: str, cookies: dict[str, str]) -> V
     response_model=SessionResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create streaming session",
-    description="Initialize a new streaming session with CloudFront cookies",
+    description="Initialize a new streaming session with CloudFront cookies. "
+                "Validates the manifest_url is accessible before creating the session.",
 )
 async def create_session(request: CreateSessionRequest) -> SessionResponse:
     """
     Create a new streaming session.
 
     A single session can be used for multiple feeds from the same base URL.
-    If validate_path is provided, will fetch the M3U8 file to verify cookies work.
+    The manifest_url is fetched to verify cookies work before creating the session.
     """
-    logger.info(f"Creating session for base_url: {request.base_url}")
+    logger.info(f"Creating session for base_url: {request.base_url}, manifest_url: {request.manifest_url}")
 
-    validation_result: ValidationResult | None = None
-
-    # Validate M3U8 if path provided
-    if request.validate_path:
-        validation_result = await _validate_m3u8(
-            base_url=str(request.base_url),
-            path=request.validate_path,
-            cookies=request.cookies.to_cookie_dict(),
+    # Always validate M3U8 access before creating session
+    validation_result = await _validate_m3u8(
+        manifest_url=request.manifest_url,
+        cookies=request.cookies.to_cookie_dict(),
+    )
+    
+    if not validation_result.success:
+        logger.error(f"Session creation rejected - manifest validation failed: {validation_result.error}")
+        raise M3U8ValidationError(
+            status_code=validation_result.status_code or 0,
+            message=validation_result.error or "Unknown validation error",
         )
-        if not validation_result.success:
-            raise M3U8ValidationError(
-                status_code=validation_result.status_code or 0,
-                message=validation_result.error or "Unknown validation error",
-            )
 
     session_data = session_store.create_session(
         base_url=str(request.base_url),
