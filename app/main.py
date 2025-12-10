@@ -672,14 +672,29 @@ async def websocket_monitor(websocket: WebSocket):
                 
                 # Wait for client message or timeout
                 try:
-                    await asyncio.wait_for(websocket.receive(), timeout=1.0)
+                    message = await asyncio.wait_for(websocket.receive(), timeout=1.0)
+                    # Check if this is a disconnect message
+                    if message.get("type") == "websocket.disconnect":
+                        logger.info("[Monitor WS] Received disconnect message")
+                        break
                 except asyncio.TimeoutError:
                     # Send ping to keep connection alive
-                    await websocket.send_json({"type": "ping"})
+                    try:
+                        await websocket.send_json({"type": "ping"})
+                    except Exception:
+                        # Failed to send ping - connection likely closed
+                        break
                 except WebSocketDisconnect:
                     break
                     
             except WebSocketDisconnect:
+                break
+            except RuntimeError as e:
+                # Handle "Cannot call receive once a disconnect message has been received"
+                if "disconnect" in str(e).lower():
+                    logger.info("[Monitor WS] Connection closed")
+                else:
+                    logger.error(f"[Monitor WS] RuntimeError: {e}")
                 break
             except Exception as e:
                 logger.error(f"[Monitor WS] Loop error: {type(e).__name__}: {e}")
