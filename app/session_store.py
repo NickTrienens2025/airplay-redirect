@@ -2,13 +2,97 @@
 
 import secrets
 import threading
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlparse
 
 from app.config import settings
 from app.exceptions import InvalidDomainError, SessionExpiredError, SessionNotFoundError
 from app.models import CloudFrontCookies, SessionData
+
+
+@dataclass
+class TrafficMetrics:
+    """Traffic metrics for monitoring."""
+    
+    total_requests: int = 0
+    m3u8_requests: int = 0
+    ts_requests: int = 0
+    other_requests: int = 0
+    total_bytes: int = 0
+    recent_traffic: deque = field(default_factory=lambda: deque(maxlen=100))
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _callbacks: list = field(default_factory=list)
+    
+    def record_request(
+        self,
+        path: str,
+        method: str = "GET",
+        status: int = 200,
+        bytes_sent: int = 0,
+        token: Optional[str] = None,
+    ) -> dict:
+        """Record a traffic request."""
+        with self._lock:
+            self.total_requests += 1
+            self.total_bytes += bytes_sent
+            
+            if path.endswith(".m3u8"):
+                self.m3u8_requests += 1
+            elif path.endswith(".ts") or path.endswith(".m4s"):
+                self.ts_requests += 1
+            else:
+                self.other_requests += 1
+            
+            entry = {
+                "type": "traffic",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "path": path,
+                "method": method,
+                "status": status,
+                "bytes": bytes_sent,
+                "token": token[:8] + "..." if token and len(token) > 8 else token,
+            }
+            self.recent_traffic.append(entry)
+            
+            # Notify callbacks
+            for callback in self._callbacks:
+                try:
+                    callback(entry)
+                except Exception:
+                    pass
+            
+            return entry
+    
+    def add_callback(self, callback: Callable[[dict], None]) -> None:
+        """Add a callback for traffic events."""
+        with self._lock:
+            self._callbacks.append(callback)
+    
+    def remove_callback(self, callback: Callable[[dict], None]) -> None:
+        """Remove a traffic callback."""
+        with self._lock:
+            if callback in self._callbacks:
+                self._callbacks.remove(callback)
+    
+    def get_stats(self) -> dict:
+        """Get current traffic statistics."""
+        with self._lock:
+            return {
+                "type": "stats",
+                "total_requests": self.total_requests,
+                "m3u8_requests": self.m3u8_requests,
+                "ts_requests": self.ts_requests,
+                "other_requests": self.other_requests,
+                "total_bytes": self.total_bytes,
+            }
+    
+    def get_recent_traffic(self) -> list:
+        """Get recent traffic entries."""
+        with self._lock:
+            return list(self.recent_traffic)
 
 
 class SessionStore:
@@ -239,6 +323,26 @@ class SessionStore:
         with self._lock:
             return len(self._sessions_by_id)
 
+    def get_all_sessions(self) -> dict[str, dict]:
+        """Get all active sessions as a dictionary for monitoring."""
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            sessions = {}
+            for session_id, session in self._sessions_by_id.items():
+                if not session.is_expired(now):
+                    sessions[session_id] = {
+                        "session_id": session.session_id,
+                        "token": session.token[:8] + "..." if len(session.token) > 8 else session.token,
+                        "base_url": session.base_url,
+                        "created_at": session.created_at.isoformat(),
+                        "expires_at": session.expires_at.isoformat(),
+                        "last_accessed": session.last_accessed.isoformat(),
+                    }
+            return sessions
+
 
 # Global session store instance
 session_store = SessionStore()
+
+# Global traffic metrics instance
+traffic_metrics = TrafficMetrics()

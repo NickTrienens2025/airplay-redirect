@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import AsyncGenerator, Set
 
 import httpx
-from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect, status
+from fastapi import BackgroundTask, FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from app.config import settings
@@ -26,7 +26,7 @@ from app.models import (
     RefreshSessionResponse,
     SessionResponse,
 )
-from app.session_store import session_store
+from app.session_store import session_store, traffic_metrics
 
 # Configure logging
 logging.basicConfig(
@@ -88,6 +88,9 @@ demo_session: SessionResponse | None = None
 
 # WebSocket connections for log streaming
 websocket_connections: Set[WebSocket] = set()
+
+# WebSocket connections for monitoring
+monitor_connections: Set[WebSocket] = set()
 
 # In-memory log buffer (last 1000 log entries)
 log_buffer: deque = deque(maxlen=1000)
@@ -459,6 +462,15 @@ async def stream_content(
                 )
                 logger.info(f"[PROXY] Manifest rewritten: {len(rewritten_manifest)} bytes, path={path}")
 
+                # Record traffic for monitoring
+                traffic_metrics.record_request(
+                    path=path,
+                    method="GET",
+                    status=200,
+                    bytes_sent=len(rewritten_manifest),
+                    token=token,
+                )
+
                 return Response(
                     content=rewritten_manifest,
                     media_type=content_type,
@@ -505,7 +517,16 @@ async def stream_content(
             # Set status code (206 for partial content if Range was requested)
             status_code = status.HTTP_206_PARTIAL_CONTENT if "Range" in request.headers else status.HTTP_200_OK
             logger.info(f"[PROXY] Response status: {status_code}, path={path}")
-            
+
+            # Record traffic for monitoring
+            traffic_metrics.record_request(
+                path=path,
+                method="GET",
+                status=status_code,
+                bytes_sent=bytes_fetched,
+                token=token,
+            )
+
             return Response(
                 content=body,
                 media_type=content_type,
@@ -584,6 +605,89 @@ async def websocket_logs(websocket: WebSocket):
     finally:
         websocket_connections.discard(websocket)
         logger.info(f"[WS] Client disconnected: {len(websocket_connections)} remaining connections")
+
+
+@app.websocket("/ws/monitor")
+async def websocket_monitor(websocket: WebSocket):
+    """WebSocket endpoint for monitoring sessions and traffic."""
+    await websocket.accept()
+    monitor_connections.add(websocket)
+    logger.info(f"[Monitor WS] Client connected: {len(monitor_connections)} total connections")
+    
+    # Queue for traffic events
+    traffic_queue: asyncio.Queue = asyncio.Queue()
+    
+    # Callback to push traffic events to queue
+    def traffic_callback(entry: dict) -> None:
+        try:
+            traffic_queue.put_nowait(entry)
+        except Exception:
+            pass
+    
+    # Register callback
+    traffic_metrics.add_callback(traffic_callback)
+    
+    try:
+        # Send initial stats
+        await websocket.send_json(traffic_metrics.get_stats())
+        
+        # Send current sessions
+        await websocket.send_json({
+            "type": "sessions",
+            "sessions": session_store.get_all_sessions(),
+        })
+        
+        # Send recent traffic history
+        for entry in traffic_metrics.get_recent_traffic():
+            try:
+                await websocket.send_json(entry)
+            except Exception:
+                break
+        
+        # Main loop - handle incoming messages and send updates
+        last_session_update = datetime.now()
+        
+        while True:
+            try:
+                # Check for traffic events (non-blocking)
+                try:
+                    while True:
+                        entry = traffic_queue.get_nowait()
+                        await websocket.send_json(entry)
+                except asyncio.QueueEmpty:
+                    pass
+                
+                # Send session updates periodically (every 5 seconds)
+                now = datetime.now()
+                if (now - last_session_update).total_seconds() >= 5:
+                    await websocket.send_json({
+                        "type": "sessions",
+                        "sessions": session_store.get_all_sessions(),
+                    })
+                    last_session_update = now
+                
+                # Wait for client message or timeout
+                try:
+                    await asyncio.wait_for(websocket.receive(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    # Send ping to keep connection alive
+                    await websocket.send_json({"type": "ping"})
+                except WebSocketDisconnect:
+                    break
+                    
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                logger.debug(f"[Monitor WS] Connection error: {e}")
+                break
+                
+    except Exception as e:
+        logger.debug(f"[Monitor WS] Connection error: {e}")
+    finally:
+        # Cleanup
+        traffic_metrics.remove_callback(traffic_callback)
+        monitor_connections.discard(websocket)
+        logger.info(f"[Monitor WS] Client disconnected: {len(monitor_connections)} remaining connections")
 
 
 @app.get(
@@ -689,5 +793,15 @@ async def root(request: Request) -> HTMLResponse:
     html_content = html_template.replace("{{video_section}}", video_section)
     html_content = html_content.replace("{{json_str}}", json_str)
     html_content = html_content.replace("{{stream_url}}", stream_url if stream_url else "")
+    
+    return HTMLResponse(content=html_content)
+
+
+@app.get("/monitor", include_in_schema=False)
+async def monitor_page() -> HTMLResponse:
+    """Monitoring dashboard for sessions and traffic."""
+    template_path = os.path.join(os.path.dirname(__file__), "templates", "monitor.html")
+    with open(template_path, "r") as f:
+        html_content = f.read()
     
     return HTMLResponse(content=html_content)
