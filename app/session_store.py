@@ -93,6 +93,30 @@ class TrafficMetrics:
         """Get recent traffic entries."""
         with self._lock:
             return list(self.recent_traffic)
+    
+    def reset(self) -> dict:
+        """Reset all traffic statistics and return cleared notification."""
+        with self._lock:
+            self.total_requests = 0
+            self.m3u8_requests = 0
+            self.ts_requests = 0
+            self.other_requests = 0
+            self.total_bytes = 0
+            self.recent_traffic.clear()
+            
+            # Notify callbacks about reset
+            entry = {
+                "type": "reset",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "message": "Statistics cleared",
+            }
+            for callback in self._callbacks:
+                try:
+                    callback(entry)
+                except Exception:
+                    pass
+            
+            return entry
 
 
 class SessionStore:

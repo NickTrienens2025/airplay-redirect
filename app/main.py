@@ -428,6 +428,14 @@ async def stream_content(
                     f"[PROXY] CloudFront error: status={cf_response.status_code}, "
                     f"url={cloudfront_url}, path={path}"
                 )
+                # Record error in traffic metrics
+                traffic_metrics.record_request(
+                    path=path,
+                    method="GET",
+                    status=cf_response.status_code,
+                    bytes_sent=0,
+                    token=token,
+                )
                 raise CloudFrontError(
                     status_code=cf_response.status_code,
                     detail=f"CloudFront returned {cf_response.status_code}",
@@ -677,6 +685,18 @@ async def websocket_monitor(websocket: WebSocket):
                     if message.get("type") == "websocket.disconnect":
                         logger.info("[Monitor WS] Received disconnect message")
                         break
+                    # Check for text messages (commands from client)
+                    if message.get("type") == "websocket.receive" and "text" in message:
+                        try:
+                            import json
+                            cmd = json.loads(message["text"])
+                            if cmd.get("action") == "clear":
+                                logger.info("[Monitor WS] Clearing traffic stats")
+                                traffic_metrics.reset()
+                                # Send updated stats
+                                await websocket.send_json(traffic_metrics.get_stats())
+                        except Exception:
+                            pass
                 except asyncio.TimeoutError:
                     # Send ping to keep connection alive
                     try:

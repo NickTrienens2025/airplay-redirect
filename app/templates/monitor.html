@@ -34,6 +34,28 @@
         .header h1 .icon {
             font-size: 1.2em;
         }
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .btn {
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: none;
+            font-size: 0.85em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-clear {
+            background: rgba(244, 67, 54, 0.2);
+            color: #f44336;
+            border: 1px solid rgba(244, 67, 54, 0.3);
+        }
+        .btn-clear:hover {
+            background: rgba(244, 67, 54, 0.3);
+        }
         .status-badge {
             display: flex;
             align-items: center;
@@ -125,12 +147,17 @@
             padding: 16px;
             border-bottom: 1px solid #38444d;
             transition: background 0.2s;
+            cursor: pointer;
         }
         .session-item:last-child {
             border-bottom: none;
         }
         .session-item:hover {
-            background: rgba(255,255,255,0.03);
+            background: rgba(255,255,255,0.05);
+        }
+        .session-item.selected {
+            background: rgba(29, 161, 242, 0.1);
+            border-left: 3px solid #1da1f2;
         }
         .session-header {
             display: flex;
@@ -178,6 +205,36 @@
             color: #657786;
             min-width: 80px;
         }
+        .session-actions {
+            margin-top: 12px;
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .session-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            background: rgba(29, 161, 242, 0.2);
+            color: #1da1f2;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 0.8em;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+        .session-link:hover {
+            background: rgba(29, 161, 242, 0.3);
+        }
+        .session-link.copy {
+            background: rgba(156, 39, 176, 0.2);
+            color: #ce93d8;
+            cursor: pointer;
+        }
+        .session-link.copy:hover {
+            background: rgba(156, 39, 176, 0.3);
+        }
         .traffic-feed {
             max-height: 500px;
             overflow-y: auto;
@@ -193,6 +250,9 @@
         }
         .traffic-item:last-child {
             border-bottom: none;
+        }
+        .traffic-item.error {
+            background: rgba(244, 67, 54, 0.05);
         }
         .traffic-time {
             color: #657786;
@@ -288,6 +348,29 @@
         .full-width {
             grid-column: 1 / -1;
         }
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 12px 20px;
+            background: #1a1f2e;
+            border: 1px solid #38444d;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 0.9em;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: all 0.3s;
+            z-index: 1000;
+        }
+        .toast.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        .toast.success {
+            border-color: #00c853;
+            background: rgba(0, 200, 83, 0.1);
+        }
         @media (max-width: 768px) {
             .grid {
                 grid-template-columns: 1fr;
@@ -304,9 +387,14 @@
             <span class="icon">📊</span>
             AirPlay HLS Proxy Monitor
         </h1>
-        <div class="status-badge disconnected" id="connection-status">
-            <span class="status-dot"></span>
-            <span id="connection-text">Connecting...</span>
+        <div class="header-actions">
+            <button class="btn btn-clear" onclick="clearStats()" title="Clear all statistics">
+                🗑️ Clear Stats
+            </button>
+            <div class="status-badge disconnected" id="connection-status">
+                <span class="status-dot"></span>
+                <span id="connection-text">Connecting...</span>
+            </div>
         </div>
     </div>
     
@@ -404,11 +492,14 @@
         </div>
     </div>
     
+    <div class="toast" id="toast"></div>
+    
     <script>
         // WebSocket connection for monitoring
         let ws = null;
         let reconnectAttempts = 0;
         const maxReconnectAttempts = 10;
+        let selectedSessionId = null;
         
         // Metrics state
         const metrics = {
@@ -425,6 +516,15 @@
         // Traffic history (last 100 entries)
         const trafficHistory = [];
         const maxTrafficEntries = 100;
+        
+        function showToast(message, type = 'info') {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = 'toast show' + (type === 'success' ? ' success' : '');
+            setTimeout(() => {
+                toast.className = 'toast';
+            }, 3000);
+        }
         
         function formatBytes(bytes) {
             if (bytes === 0) return '0 B';
@@ -447,6 +547,53 @@
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+        
+        function getStreamUrl(session, token) {
+            // Extract manifest path from base_url
+            const baseUrl = window.location.origin;
+            // For demo session, use a known path
+            if (session.session_id && session.session_id.includes('demo')) {
+                return `${baseUrl}/stream/x36xhzz.m3u8?token=${token}`;
+            }
+            // For other sessions, construct a generic path
+            return `${baseUrl}/stream/?token=${token}`;
+        }
+        
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                showToast('Copied to clipboard!', 'success');
+            }).catch(() => {
+                showToast('Failed to copy', 'error');
+            });
+        }
+        
+        function clearStats() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action: 'clear' }));
+                
+                // Clear local state
+                metrics.totalRequests = 0;
+                metrics.m3u8Requests = 0;
+                metrics.tsRequests = 0;
+                metrics.otherRequests = 0;
+                metrics.totalBytes = 0;
+                metrics.recentRequests = [];
+                metrics.rateHistory = new Array(60).fill(0);
+                trafficHistory.length = 0;
+                
+                // Clear UI
+                document.getElementById('traffic-feed').innerHTML = `
+                    <div class="empty-state">
+                        <div class="icon">📡</div>
+                        <p>Statistics cleared. Waiting for traffic...</p>
+                    </div>
+                `;
+                
+                updateUI();
+                updateRateChart();
+                showToast('Statistics cleared', 'success');
+            }
         }
         
         function updateUI() {
@@ -490,6 +637,11 @@
             }).join('');
         }
         
+        function selectSession(sessionId) {
+            selectedSessionId = sessionId;
+            updateSessionsList(metrics.sessions);
+        }
+        
         function updateSessionsList(sessions) {
             const list = document.getElementById('sessions-list');
             
@@ -504,11 +656,14 @@
             }
             
             const now = new Date();
+            const baseUrl = window.location.origin;
+            
             list.innerHTML = Object.entries(sessions).map(([id, session]) => {
                 const expiresAt = new Date(session.expires_at);
                 const minutesLeft = Math.max(0, Math.round((expiresAt - now) / 60000));
                 const isDemo = id.includes('demo');
                 const isExpiring = minutesLeft < 5 && !isDemo;
+                const isSelected = id === selectedSessionId;
                 
                 let statusClass = 'active';
                 let statusText = 'Active';
@@ -520,16 +675,38 @@
                     statusText = `${minutesLeft}m left`;
                 }
                 
+                // Get the full token (we only have truncated version, so construct URL pattern)
+                const token = session.token || '';
+                const fullToken = isDemo ? 't_demo_boops_and_bips' : token;
+                
+                // Construct stream URL
+                let streamPath = isDemo ? 'x36xhzz.m3u8' : 'manifest.m3u8';
+                const streamUrl = `${baseUrl}/stream/${streamPath}?token=${fullToken}`;
+                
                 return `
-                    <div class="session-item">
+                    <div class="session-item ${isSelected ? 'selected' : ''}" onclick="selectSession('${escapeHtml(id)}')">
                         <div class="session-header">
-                            <span class="session-id">${escapeHtml(id.substring(0, 20))}...</span>
+                            <span class="session-id">${escapeHtml(id.substring(0, 24))}...</span>
                             <span class="session-status ${statusClass}">${statusText}</span>
                         </div>
                         <div class="session-details">
                             <p><span class="label">Base URL:</span> ${escapeHtml(session.base_url || 'N/A')}</p>
+                            <p><span class="label">Token:</span> <code>${escapeHtml(fullToken.substring(0, 12))}...</code></p>
                             <p><span class="label">Created:</span> ${session.created_at ? new Date(session.created_at).toLocaleString() : 'N/A'}</p>
-                            <p><span class="label">Last Access:</span> ${session.last_accessed ? new Date(session.last_accessed).toLocaleString() : 'N/A'}</p>
+                            <p><span class="label">Expires:</span> ${session.expires_at ? new Date(session.expires_at).toLocaleString() : 'N/A'}</p>
+                        </div>
+                        <div class="session-actions">
+                            <a href="${streamUrl}" target="_blank" class="session-link" title="Open stream in new tab">
+                                ▶️ Open Stream
+                            </a>
+                            <span class="session-link copy" onclick="event.stopPropagation(); copyToClipboard('${streamUrl}')" title="Copy stream URL">
+                                📋 Copy URL
+                            </span>
+                            ${isDemo ? `
+                            <a href="${baseUrl}/" class="session-link" title="Go to player page">
+                                🎬 Player Page
+                            </a>
+                            ` : ''}
                         </div>
                     </div>
                 `;
@@ -570,7 +747,8 @@
             
             // Create traffic entry element
             const div = document.createElement('div');
-            div.className = 'traffic-item';
+            const isError = entry.status && entry.status >= 400;
+            div.className = 'traffic-item' + (isError ? ' error' : '');
             
             const statusClass = entry.status ? `s${Math.floor(entry.status / 100)}xx` : '';
             const time = entry.timestamp ? new Date(entry.timestamp) : new Date();
@@ -581,7 +759,7 @@
                 <span class="traffic-path" title="${escapeHtml(entry.path || '')}">${escapeHtml(entry.path || 'N/A')}</span>
                 ${entry.status ? `<span class="traffic-status ${statusClass}">${entry.status}</span>` : ''}
                 <span class="traffic-size">${entry.bytes ? formatBytes(entry.bytes) : '-'}</span>
-                ${entry.token ? `<span class="traffic-token">${escapeHtml(entry.token.substring(0, 8))}...</span>` : ''}
+                ${entry.token ? `<span class="traffic-token">${escapeHtml(entry.token)}</span>` : ''}
             `;
             
             feed.insertBefore(div, feed.firstChild);
@@ -627,11 +805,20 @@
                                 break;
                             case 'stats':
                                 // Initial stats sync
-                                if (data.total_requests) metrics.totalRequests = data.total_requests;
-                                if (data.total_bytes) metrics.totalBytes = data.total_bytes;
-                                if (data.m3u8_requests) metrics.m3u8Requests = data.m3u8_requests;
-                                if (data.ts_requests) metrics.tsRequests = data.ts_requests;
-                                if (data.other_requests) metrics.otherRequests = data.other_requests;
+                                if (data.total_requests !== undefined) metrics.totalRequests = data.total_requests;
+                                if (data.total_bytes !== undefined) metrics.totalBytes = data.total_bytes;
+                                if (data.m3u8_requests !== undefined) metrics.m3u8Requests = data.m3u8_requests;
+                                if (data.ts_requests !== undefined) metrics.tsRequests = data.ts_requests;
+                                if (data.other_requests !== undefined) metrics.otherRequests = data.other_requests;
+                                updateUI();
+                                break;
+                            case 'reset':
+                                // Stats were cleared on server
+                                metrics.totalRequests = 0;
+                                metrics.m3u8Requests = 0;
+                                metrics.tsRequests = 0;
+                                metrics.otherRequests = 0;
+                                metrics.totalBytes = 0;
                                 updateUI();
                                 break;
                             default:
