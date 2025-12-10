@@ -610,12 +610,16 @@ async def websocket_logs(websocket: WebSocket):
 @app.websocket("/ws/monitor")
 async def websocket_monitor(websocket: WebSocket):
     """WebSocket endpoint for monitoring sessions and traffic."""
-    await websocket.accept()
-    monitor_connections.add(websocket)
-    logger.info(f"[Monitor WS] Client connected: {len(monitor_connections)} total connections")
+    try:
+        await websocket.accept()
+        monitor_connections.add(websocket)
+        logger.info(f"[Monitor WS] Client connected: {len(monitor_connections)} total connections")
+    except Exception as e:
+        logger.error(f"[Monitor WS] Failed to accept connection: {e}")
+        return
     
     # Queue for traffic events
-    traffic_queue: asyncio.Queue = asyncio.Queue()
+    traffic_queue = asyncio.Queue()
     
     # Callback to push traffic events to queue
     def traffic_callback(entry: dict) -> None:
@@ -678,11 +682,11 @@ async def websocket_monitor(websocket: WebSocket):
             except WebSocketDisconnect:
                 break
             except Exception as e:
-                logger.debug(f"[Monitor WS] Connection error: {e}")
+                logger.error(f"[Monitor WS] Loop error: {type(e).__name__}: {e}")
                 break
                 
     except Exception as e:
-        logger.debug(f"[Monitor WS] Connection error: {e}")
+        logger.error(f"[Monitor WS] Connection error: {type(e).__name__}: {e}")
     finally:
         # Cleanup
         traffic_metrics.remove_callback(traffic_callback)
